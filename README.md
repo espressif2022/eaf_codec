@@ -53,6 +53,7 @@ eaf_codec/
 ├── tests/
 │   └── test_roundtrip.py           # 0x00..0x07 全模式 + 双格式 CLI 自动化回归测试
 └── docs/
+    ├── BENCHMARK_REPORT.md         # ESP32-S31 目标板硬件实测报告（压缩率/解码耗时/FPS/PSNR/SRAM&PSRAM占用）
     ├── COMPRESSION_SUMMARY.md      # 0x00..0x07 统一编码表、565/8888 支持声明与选型指南
     ├── FORMAT.md                   # EAF4 二进制格式规范
     └── EAF_COMPRESSION_MODES_GUIDE.md # 各模式底层算法原理详解
