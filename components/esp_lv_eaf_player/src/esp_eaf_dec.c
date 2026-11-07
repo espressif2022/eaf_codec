@@ -1251,14 +1251,7 @@ esp_err_t esp_eaf_block_decode_ctx(esp_eaf_decoder_t *decoder, const esp_eaf_hea
         }
         size_t scratch_need = (size_t)raw_len + (size_t)n_esc * 3;
         uint8_t *raw_buf = NULL;
-        /* Fixed internal-RAM scratch for typical inter blocks; larger blocks (keyframes) use PSRAM */
-        if (!decoder->lossless_int_tried) {
-            decoder->lossless_int_tried = true;
-            if (heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) >
-                    EAF_LOSSLESS_INT_SCRATCH + EAF_LOSSLESS_INT_RESERVE) {
-                esp_eaf_decoder_reserve_internal_scratch(decoder, EAF_LOSSLESS_INT_SCRATCH);
-            }
-        }
+        /* Use caller-reserved internal SRAM scratch if it fits; otherwise use PSRAM */
         if (scratch_need + 4 <= decoder->lossless_int_capacity) {
             raw_buf = decoder->lossless_int_scratch;
         }

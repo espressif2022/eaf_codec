@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "esp-eaf-codec"
+version = "2.0.0"
+description = "Host encoder, batch packager, and inspector for ESP EAF (RGB565) and EAF4 (BGRA8888) animations"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Apache-2.0" }
+dependencies = [
+    "numpy>=1.24",
+    "Pillow>=10.0",
+]
+
+[project.scripts]
+esp-eaf-tool = "tools.eaf_cli:main"
+
+[tool.setuptools.packages.find]
+include = ["encoder*", "tools*"]

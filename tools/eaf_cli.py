@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Unified EAF / EAF4 CLI exposing the 4 converged production modes (0x04..0x07):
+"""Host converter, batch flash packager, C-array generator, and inspector for EAF/EAF4.
 
+Supports the 4 converged production codecs (0x04..0x07):
   - 0x04 lossless  : 100% Bit-Exact Lossless (BGRA8888 in EAF4, RGB565+A8 in EAF)
   - 0x05 btc-safe  : 4x4 Error-Bounded BTC + Raw Escape (maxErr <= 8, BGRA8888 & RGB565)
   - 0x06 quad-jpeg : 16x16+8x8 Quadtree Delta Strip JPEG (HW JPEG aligned, RGB888 & RGB565, no alpha)
@@ -10,49 +11,305 @@
 from __future__ import annotations
 
 import argparse
+import json
+import re
 import struct
+import subprocess
 import sys
+import tempfile
+import zlib
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(ROOT / "tools"))
+import numpy as np
+from PIL import Image, ImageSequence
 
-from encoder.eaf4 import INDEX, INDEX_SIZE, MODE_NAMES, decode, encode_paths  # noqa: E402
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+if str(ROOT / "tools") not in sys.path:
+    sys.path.insert(0, str(ROOT / "tools"))
+
+from encoder.eaf4 import INDEX, INDEX_SIZE, MODE_NAMES, decode, encode  # noqa: E402
 from encoder.eaf565 import convert_to_eaf  # noqa: E402
 from eaf_inspector.parser import parse_file, print_text  # noqa: E402
 
 
-def _encode(args: argparse.Namespace) -> int:
-    if args.format == "565" or args.codec in ("quad-jpeg", "h264"):
-        convert_to_eaf(
-            files=args.frames,
-            out_path=args.output,
-            mode=args.codec,
-            btc_max_error=args.btc_max_error,
-            keyframe_interval=args.key_interval,
-        )
-        size = Path(args.output).stat().st_size
-        print(
-            f"wrote {args.output} container=EAF(0x89) format={args.format} "
-            f"codec={args.codec} frames={len(args.frames)} bytes={size}"
-        )
-        return 0
+def _natural_sort_key(path: Path) -> tuple:
+    parts = re.split(r"(\d+)", path.stem)
+    return tuple(int(p) if p.isdigit() else p.lower() for p in parts)
 
-    profile = "btc8888" if args.codec == "btc-safe" else args.lossless_profile
-    summary = encode_paths(
-        args.frames,
-        args.output,
-        period_ms=args.period,
-        key_interval=args.key_interval,
+
+def _load_input_frames(
+    inputs: list[str],
+    align: int = 4,
+    resize: tuple[int, int] | None = None,
+) -> list[np.ndarray]:
+    """Load RGBA frames from PNG list, directory, GIF, APNG, or video file and return aligned BGRA8888 arrays."""
+    pil_frames: list[Image.Image] = []
+    if len(inputs) == 1:
+        p = Path(inputs[0])
+        if p.is_dir():
+            pngs = sorted(p.glob("*.png"), key=_natural_sort_key)
+            if not pngs:
+                raise ValueError(f"No .png files found in directory: {p}")
+            for png in pngs:
+                with Image.open(png) as im:
+                    pil_frames.append(im.convert("RGBA").copy())
+        elif p.suffix.lower() in (".gif", ".apng", ".webp"):
+            with Image.open(p) as im:
+                for frame in ImageSequence.Iterator(im):
+                    pil_frames.append(frame.convert("RGBA").copy())
+        elif p.suffix.lower() in (".mp4", ".avi", ".mov", ".mkv"):
+            with tempfile.TemporaryDirectory() as tmp:
+                pattern = str(Path(tmp) / "frame_%04d.png")
+                subprocess.run(
+                    ["ffmpeg", "-y", "-v", "error", "-i", str(p), pattern],
+                    check=True,
+                )
+                for png in sorted(Path(tmp).glob("frame_*.png"), key=_natural_sort_key):
+                    with Image.open(png) as im:
+                        pil_frames.append(im.convert("RGBA").copy())
+        else:
+            with Image.open(p) as im:
+                pil_frames.append(im.convert("RGBA").copy())
+    else:
+        for item in inputs:
+            with Image.open(item) as im:
+                pil_frames.append(im.convert("RGBA").copy())
+
+    if not pil_frames:
+        raise ValueError("No frames loaded from input")
+
+    bgra_frames: list[np.ndarray] = []
+    for im in pil_frames:
+        if resize is not None and im.size != resize:
+            im = im.resize(resize, Image.Resampling.LANCZOS)
+        rgba = np.array(im, dtype=np.uint8)
+        h, w, _ = rgba.shape
+        pad_h = (align - (h % align)) % align
+        pad_w = (align - (w % align)) % align
+        if pad_h or pad_w:
+            rgba = np.pad(rgba, ((0, pad_h), (0, pad_w), (0, 0)), mode="constant")
+        bgra = np.ascontiguousarray(rgba[..., [2, 1, 0, 3]])
+        bgra_frames.append(bgra)
+    return bgra_frames
+
+
+def _write_c_header(blob: bytes, header_path: Path, symbol_name: str) -> None:
+    symbol = re.sub(r"[^0-9a-zA-Z_]", "_", symbol_name)
+    if symbol[0].isdigit():
+        symbol = "eaf_" + symbol
+    lines = [
+        "/* Auto-generated by esp-eaf-tool. Do not edit. */",
+        "#pragma once",
+        "#include <stddef.h>",
+        "#include <stdint.h>",
+        "",
+        f"static const size_t {symbol}_size = {len(blob)}U;",
+        f"static const uint8_t {symbol}_data[{len(blob)}] __attribute__((aligned(64))) = {{",
+    ]
+    for i in range(0, len(blob), 16):
+        chunk = blob[i : i + 16]
+        hex_str = ", ".join(f"0x{b:02x}" for b in chunk)
+        lines.append(f"    {hex_str},")
+    lines.append("};")
+    header_path.parent.mkdir(parents=True, exist_ok=True)
+    header_path.write_text("\n".join(lines) + "\n")
+
+
+def _encode_single_to_bytes(
+    inputs: list[str],
+    fmt: str,
+    codec: str,
+    lossless_profile: str,
+    period: int,
+    key_interval: int,
+    btc_max_error: int,
+    resize: tuple[int, int] | None = None,
+) -> tuple[bytes, dict]:
+    align = 16 if codec == "quad-jpeg" else 4
+    bgra_frames = _load_input_frames(inputs, align=align, resize=resize)
+    h, w, _ = bgra_frames[0].shape
+
+    if fmt == "565" or codec in ("quad-jpeg", "h264"):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp)
+            png_paths = []
+            for idx, bgra in enumerate(bgra_frames):
+                rgba = bgra[..., [2, 1, 0, 3]]
+                p = tmp_dir / f"f_{idx:04d}.png"
+                Image.fromarray(rgba, "RGBA").save(p)
+                png_paths.append(str(p))
+            out_tmp = tmp_dir / "out.eaf"
+            convert_to_eaf(
+                files=png_paths,
+                out_path=str(out_tmp),
+                mode=codec,
+                btc_max_error=btc_max_error,
+                keyframe_interval=key_interval,
+            )
+            blob = out_tmp.read_bytes()
+            summary = {
+                "container": "EAF(0x89)",
+                "format": fmt,
+                "codec": codec,
+                "width": w,
+                "height": h,
+                "frames": len(bgra_frames),
+                "bytes": len(blob),
+                "crc32": zlib.crc32(blob) & 0xFFFFFFFF,
+            }
+            return blob, summary
+
+    profile = "btc8888" if codec == "btc-safe" else lossless_profile
+    blob, summary = encode(
+        bgra_frames,
+        period_ms=period,
+        key_interval=key_interval,
         profile=profile,
-        btc_max_error=args.btc_max_error,
+        btc_max_error=btc_max_error,
     )
-    counts = summary["mode_counts_all"]
+    summary["container"] = "EAF4(8888)"
+    summary["format"] = "8888"
+    summary["codec"] = codec
+    summary["crc32"] = zlib.crc32(blob) & 0xFFFFFFFF
+    return blob, summary
+
+
+def _parse_resize(val: str | None) -> tuple[int, int] | None:
+    if not val:
+        return None
+    m = re.match(r"^(\d+)x(\d+)$", val.strip())
+    if not m:
+        raise ValueError(f"Invalid --resize format '{val}', expected WIDTHxHEIGHT (e.g. 240x240)")
+    return int(m.group(1)), int(m.group(2))
+
+
+def _encode(args: argparse.Namespace) -> int:
+    resize = _parse_resize(args.resize)
+    blob, summary = _encode_single_to_bytes(
+        inputs=args.frames,
+        fmt=args.format,
+        codec=args.codec,
+        lossless_profile=args.lossless_profile,
+        period=args.period,
+        key_interval=args.key_interval,
+        btc_max_error=args.btc_max_error,
+        resize=resize,
+    )
+    out_path = Path(args.output)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_bytes(blob)
+
+    if args.c_header:
+        sym = args.c_symbol or out_path.stem
+        _write_c_header(blob, Path(args.c_header), sym)
+
+    sub_info = f" submodes={summary['mode_counts_all']}" if "mode_counts_all" in summary else ""
     print(
-        f"wrote {args.output} container=EAF4(8888) codec={args.codec} "
-        f"{summary['width']}x{summary['height']} frames={summary['frames']} "
-        f"bytes={summary['bytes']} submodes={counts}"
+        f"wrote {args.output} container={summary['container']} format={summary['format']} "
+        f"codec={summary['codec']} {summary['width']}x{summary['height']} "
+        f"frames={summary['frames']} bytes={summary['bytes']}{sub_info}"
+    )
+    return 0
+
+
+def _batch(args: argparse.Namespace) -> int:
+    in_dir = Path(args.input_dir)
+    out_dir = Path(args.output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    resize = _parse_resize(args.resize)
+    ext = ".eaf4" if (args.format == "8888" and args.codec in ("lossless", "btc-safe")) else ".eaf"
+
+    targets: list[tuple[str, list[str]]] = []
+    for child in sorted(in_dir.iterdir(), key=_natural_sort_key):
+        if child.is_dir() and list(child.glob("*.png")):
+            targets.append((child.name, [str(child)]))
+        elif child.is_file() and child.suffix.lower() in (".gif", ".apng", ".mp4", ".avi"):
+            targets.append((child.stem, [str(child)]))
+
+    if not targets:
+        print(f"No animation folders or (.gif/.apng/.mp4) files found in {in_dir}", file=sys.stderr)
+        return 1
+
+    manifest_items = []
+    packed_bin = bytearray()
+
+    for name, inp in targets:
+        blob, summary = _encode_single_to_bytes(
+            inputs=inp,
+            fmt=args.format,
+            codec=args.codec,
+            lossless_profile=args.lossless_profile,
+            period=args.period,
+            key_interval=args.key_interval,
+            btc_max_error=args.btc_max_error,
+            resize=resize,
+        )
+        file_out = out_dir / f"{name}{ext}"
+        file_out.write_bytes(blob)
+
+        offset = len(packed_bin)
+        packed_bin.extend(blob)
+        pad = (64 - (len(packed_bin) % 64)) % 64
+        if pad:
+            packed_bin.extend(bytes(pad))
+
+        item = {
+            "name": name,
+            "file": file_out.name,
+            "offset": offset,
+            "size": len(blob),
+            "width": summary["width"],
+            "height": summary["height"],
+            "frames": summary["frames"],
+            "container": summary["container"],
+            "codec": summary["codec"],
+            "crc32": f"0x{summary['crc32']:08X}",
+        }
+        manifest_items.append(item)
+        print(
+            f"[batch] {name:<22} -> {file_out.name:<26} "
+            f"{summary['width']}x{summary['height']} {summary['frames']:3d}f {len(blob)/1024:7.1f} KB"
+        )
+
+    bin_path = out_dir / "eaf_assets.bin"
+    bin_path.write_bytes(packed_bin)
+    manifest_path = out_dir / "manifest.json"
+    manifest_path.write_text(
+        json.dumps({"total_bytes": len(packed_bin), "assets": manifest_items}, indent=2, ensure_ascii=False) + "\n"
+    )
+
+    c_hdr_path = out_dir / "eaf_assets_table.h"
+    h_lines = [
+        "/* Auto-generated by esp-eaf-tool batch packager. */",
+        "#pragma once",
+        "#include <stdint.h>",
+        "",
+        "typedef struct {",
+        "    const char *name;",
+        "    uint32_t offset;",
+        "    uint32_t size;",
+        "    uint16_t width;",
+        "    uint16_t height;",
+        "    uint32_t frames;",
+        "    uint32_t crc32;",
+        "} eaf_asset_entry_t;",
+        "",
+        f"#define EAF_ASSET_COUNT {len(manifest_items)}U",
+        "static const eaf_asset_entry_t g_eaf_assets[EAF_ASSET_COUNT] = {",
+    ]
+    for it in manifest_items:
+        h_lines.append(
+            f'    {{"{it["name"]}", {it["offset"]}U, {it["size"]}U, '
+            f'{it["width"]}U, {it["height"]}U, {it["frames"]}U, {it["crc32"]}U}},'
+        )
+    h_lines.append("};")
+    c_hdr_path.write_text("\n".join(h_lines) + "\n")
+
+    print(
+        f"Batch complete: {len(manifest_items)} assets packed into {bin_path} "
+        f"({len(packed_bin)/1024:.1f} KB), manifest: {manifest_path}, C header: {c_hdr_path}"
     )
     return 0
 
@@ -91,34 +348,46 @@ def _inspect(args: argparse.Namespace) -> int:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Unified EAF Codec CLI (0x04 lossless, 0x05 btc-safe, 0x06 quad-jpeg, 0x07 h264)")
+    parser = argparse.ArgumentParser(
+        description="Unified Host Converter & Packager for ESP EAF/EAF4 (0x04 lossless, 0x05 btc-safe, 0x06 quad-jpeg, 0x07 h264)"
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    enc = sub.add_parser("encode", help="encode PNG frames using one of the 4 converged codecs (0x04..0x07)")
-    enc.add_argument("frames", nargs="+")
-    enc.add_argument("-o", "--output", required=True)
-    enc.add_argument(
-        "--format",
-        choices=["8888", "565"],
-        default="8888",
-        help="8888=BGRA8888/RGB888, 565=RGB565/RGB565A8",
-    )
+    enc = sub.add_parser("encode", help="encode PNG sequence / folder / GIF / APNG / MP4 into EAF4 or EAF")
+    enc.add_argument("frames", nargs="+", help="PNG files, a directory of PNGs, or a .gif/.apng/.mp4 file")
+    enc.add_argument("-o", "--output", required=True, help="Output .eaf4 or .eaf file")
+    enc.add_argument("--format", choices=["8888", "565"], default="8888", help="8888=BGRA8888, 565=RGB565/565A8")
     enc.add_argument(
         "--codec",
         choices=["lossless", "btc-safe", "quad-jpeg", "h264"],
         default="lossless",
-        help="0x04=lossless, 0x05=btc-safe, 0x06=quad-jpeg (no alpha), 0x07=h264 (no alpha)",
+        help="0x04=lossless, 0x05=btc-safe, 0x06=quad-jpeg, 0x07=h264",
     )
     enc.add_argument(
         "--lossless-profile",
         choices=["v1", "v2", "tile_packed"],
         default="v2",
-        help="Sub-mode selection inside 0x04 lossless (v1=0..3 compat, v2=0..5 smallest, tile_packed=fastest)",
+        help="Sub-mode strategy inside 0x04 lossless (v2=Speed-Aware RDO default, tile_packed=fastest, v1=legacy)",
     )
-    enc.add_argument("--period", type=int, default=67)
-    enc.add_argument("--key-interval", type=int, default=30)
-    enc.add_argument("--btc-max-error", type=int, default=8, help="max channel error for 0x05 btc-safe")
+    enc.add_argument("--period", type=int, default=67, help="Frame period in ms (default: 67 ms ~ 15 fps)")
+    enc.add_argument("--key-interval", type=int, default=30, help="Keyframe interval for random seek (default: 30)")
+    enc.add_argument("--btc-max-error", type=int, default=8, help="Max channel error bound for 0x05 btc-safe")
+    enc.add_argument("--resize", default=None, help="Optional resize WIDTHxHEIGHT (e.g. 240x240)")
+    enc.add_argument("--c-header", default=None, help="Optional path to emit C array header (.h)")
+    enc.add_argument("--c-symbol", default=None, help="Optional C array identifier name")
     enc.set_defaults(func=_encode)
+
+    bat = sub.add_parser("batch", help="batch-convert a directory of animations and pack a 64B-aligned flash partition image")
+    bat.add_argument("input_dir", help="Directory containing animation subfolders or .gif/.apng/.mp4 files")
+    bat.add_argument("-o", "--output-dir", required=True, help="Output directory for .eaf4/.eaf, eaf_assets.bin, manifest.json, and eaf_assets_table.h")
+    bat.add_argument("--format", choices=["8888", "565"], default="8888")
+    bat.add_argument("--codec", choices=["lossless", "btc-safe", "quad-jpeg", "h264"], default="lossless")
+    bat.add_argument("--lossless-profile", choices=["v1", "v2", "tile_packed"], default="v2")
+    bat.add_argument("--period", type=int, default=67)
+    bat.add_argument("--key-interval", type=int, default=30)
+    bat.add_argument("--btc-max-error", type=int, default=8)
+    bat.add_argument("--resize", default=None)
+    bat.set_defaults(func=_batch)
 
     for cmd in ("info", "inspect"):
         p = sub.add_parser(cmd, help="auto-detect EAF(0x89) or EAF4 header and inspect contents")

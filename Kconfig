@@ -1,0 +1,19 @@
+menu "ESP EAF Codec & Player Configuration"
+
+    config ESP_LV_EAF_ENABLE_SW_JPEG
+        bool "Enable Software JPEG Decoder (esp_new_jpeg) for 0x02/0x06 modes"
+        default y
+        help
+            Enable software JPEG decoding fallback for 0x02 JPEG_KEYFRAME and
+            0x06 QUAD_JPEG modes. Disable to save ~19KB DRAM if only using
+            0x04 LOSSLESS or 0x05 BTC_SAFE modes.
+
+    config ESP_LV_EAF_ENABLE_HW_JPEG
+        bool "Enable Hardware JPEG 2D-DMA Acceleration (ESP32-P4 / ESP32-S31)"
+        default y
+        depends on SOC_JPEG_DECODE_SUPPORTED
+        help
+            Use the hardware JPEG 2D-DMA engine when image/strip dimensions align
+            with the hardware horizontal macroblock burst size (hb = 32 / 48).
+
+endmenu

@@ -227,11 +227,13 @@ static int open_source(const char *path, const void *memory, size_t memory_size,
         offset += length;
         if (length > p->max_compressed)
             p->max_compressed = length;
-        if (decoded > p->max_decoded)
+        if (mode != EAF4_MODE_RAW && decoded > p->max_decoded)
             p->max_decoded = decoded;
     }
     if (offset != (uint32_t)size)
         goto bad;
+    if (p->max_decoded == 0)
+        p->max_decoded = 64;
     p->compressed = allocate(p->max_compressed);
     p->scratch = allocate(p->max_decoded);
     p->frame = allocate(v->frame_bytes);
@@ -427,12 +429,13 @@ int eaf4_next(eaf4_t *p, const uint8_t **pixels, uint32_t *frame_index)
     start = NOW_US();
     uLongf dest = decoded;
     uLong input = length;
-    if (uncompress2(p->scratch, &dest, compressed, &input) != Z_OK || dest != decoded || input != length)
+    uint8_t *inflate_dst = (mode == EAF4_MODE_RAW) ? p->frame : p->scratch;
+    if (uncompress2(inflate_dst, &dest, compressed, &input) != Z_OK || dest != decoded || input != length)
         return -1;
     p->timing.inflate_us = (uint32_t)(NOW_US() - start);
     start = NOW_US();
     if (mode == EAF4_MODE_RAW) {
-        memcpy(p->frame, p->scratch, p->info.frame_bytes);
+        /* Direct-to-frame zero-copy inflate: no scratch buffer or memcpy needed */
     } else if (mode == EAF4_MODE_XOR) {
         uint32_t *restrict output = (uint32_t *)p->frame;
         const uint32_t *restrict difference = (const uint32_t *)p->scratch;

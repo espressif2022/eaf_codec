@@ -122,6 +122,21 @@ def main() -> int:
         # Also verify legacy 0x00..0x03 sample inspection
         for sample in sorted((ROOT / "assets" / "eaf_samples").glob("*.eaf")):
             subprocess.run([sys.executable, cli, "inspect", str(sample)], check=True)
+        # Verify C header generation and batch flash packager
+        c_hdr = directory / "clip_asset.h"
+        subprocess.run(
+            [sys.executable, cli, "encode", "-o", str(directory / "hdr_test.eaf4"), "--c-header", str(c_hdr), str(directory)],
+            check=True,
+        )
+        if not c_hdr.is_file() or "hdr_test_data" not in c_hdr.read_text():
+            raise SystemExit("C header emission failed")
+        batch_out = directory / "batch_out"
+        subprocess.run(
+            [sys.executable, cli, "batch", str(ROOT / "assets" / "xiaobai"), "-o", str(batch_out), "--format", "8888", "--codec", "lossless"],
+            check=True,
+        )
+        if not (batch_out / "eaf_assets.bin").is_file() or not (batch_out / "eaf_assets_table.h").is_file():
+            raise SystemExit("Batch flash packager failed")
         verify_with_c(verifier, v1_out.read_bytes(), directory, "cli_v1")
         verify_with_c(verifier, btc8888_out.read_bytes(), directory, "cli_btc8888")
 

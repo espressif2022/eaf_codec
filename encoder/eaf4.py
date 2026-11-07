@@ -242,7 +242,15 @@ def encode(
             elif profile == "tile_packed":
                 mode = MODE_TILE_PACKED
             elif profile == "v2":
-                mode = min(range(6), key=lambda m: len(choices[m][0]))
+                # Speed-Aware RDO: prefer fast Tile-Packed (mode 4) or Raw (mode 0);
+                # only pick Joint-Delta (mode 5) when it saves >= 8% and >= 256 bytes over Tile-Packed.
+                best_fast = min((MODE_RAW, MODE_TILE_PACKED), key=lambda m: len(choices[m][0]))
+                fast_len = len(choices[best_fast][0])
+                joint_len = len(choices[MODE_JOINT_DELTA][0])
+                if joint_len + 256 <= fast_len and joint_len <= int(fast_len * 0.92):
+                    mode = MODE_JOINT_DELTA
+                else:
+                    mode = best_fast
             else:
                 mode = min(range(4), key=lambda m: len(choices[m][0]))
             blob, decoded_size = choices[mode]
