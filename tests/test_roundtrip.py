@@ -89,22 +89,41 @@ def main() -> int:
                     raise SystemExit(f"lossless mode {mode} mismatch at frame {idx}")
             verify_with_c(verifier, blob, directory, f"mode_{mode}")
 
-        # 2. Verify unified CLI encoding & dual-header inspection (EAF565 + EAF4)
+        # 2. Verify unified CLI encoding & dual-header inspection across 0x04..0x06
         paths = write_pngs(frames[:4], directory)
-        v1_out = directory / "clip_v1.eaf4"
-        eaf565_out = directory / "clip_565.eaf"
+        v1_out = directory / "clip_lossless_8888.eaf4"
+        btc8888_out = directory / "clip_btc_8888.eaf4"
+        eaf565_lossless = directory / "clip_lossless_565.eaf"
+        eaf565_btc = directory / "clip_btc_565.eaf"
+        eaf565_quad = directory / "clip_quad_jpeg.eaf"
         cli = str(ROOT / "tools" / "eaf_cli.py")
         subprocess.run(
-            [sys.executable, cli, "encode", "-o", str(v1_out), "--container", "eaf4", "--profile", "v1", "--key-interval", "2", *[str(p) for p in paths]],
+            [sys.executable, cli, "encode", "-o", str(v1_out), "--format", "8888", "--codec", "lossless", "--key-interval", "2", *[str(p) for p in paths]],
             check=True,
         )
         subprocess.run(
-            [sys.executable, cli, "encode", "-o", str(eaf565_out), "--container", "eaf565", "--mode565", "btc-safe", *[str(p) for p in paths]],
+            [sys.executable, cli, "encode", "-o", str(btc8888_out), "--format", "8888", "--codec", "btc-safe", *[str(p) for p in paths]],
             check=True,
         )
-        subprocess.run([sys.executable, cli, "inspect", str(v1_out)], check=True)
-        subprocess.run([sys.executable, cli, "inspect", str(eaf565_out)], check=True)
+        subprocess.run(
+            [sys.executable, cli, "encode", "-o", str(eaf565_lossless), "--format", "565", "--codec", "lossless", *[str(p) for p in paths]],
+            check=True,
+        )
+        subprocess.run(
+            [sys.executable, cli, "encode", "-o", str(eaf565_btc), "--format", "565", "--codec", "btc-safe", *[str(p) for p in paths]],
+            check=True,
+        )
+        subprocess.run(
+            [sys.executable, cli, "encode", "-o", str(eaf565_quad), "--format", "565", "--codec", "quad-jpeg", *[str(p) for p in paths]],
+            check=True,
+        )
+        for p_out in (v1_out, btc8888_out, eaf565_lossless, eaf565_btc, eaf565_quad):
+            subprocess.run([sys.executable, cli, "inspect", str(p_out)], check=True)
+        # Also verify legacy 0x00..0x03 sample inspection
+        for sample in sorted((ROOT / "assets" / "eaf_samples").glob("*.eaf")):
+            subprocess.run([sys.executable, cli, "inspect", str(sample)], check=True)
         verify_with_c(verifier, v1_out.read_bytes(), directory, "cli_v1")
+        verify_with_c(verifier, btc8888_out.read_bytes(), directory, "cli_btc8888")
 
         # 3. Verify xiaobai animation assets across v1, v2, tile_packed, btc8888
         for clip_name in ("transparent_emote", "kapi_smile", "happy_loop"):

@@ -6,15 +6,38 @@
 extern "C" {
 #endif
 
+/**
+ * @brief Internal frame sub-modes inside EAF4 (0x04 LOSSLESS & 0x05 BTC_SAFE).
+ *
+ * Under the unified codec table:
+ *   - Codec 0x04 (LOSSLESS) uses frame sub-modes 0..5 automatically per frame:
+ *       0 = Raw keyframe Deflate
+ *       1 = Full-frame 32-bit XOR Deflate
+ *       2 = 4-plane B/G/R/A XOR Deflate
+ *       3 = 4x4 tile mask + 4-plane XOR Deflate
+ *       4 = 4x4 tile mask + 32-bit word XOR Deflate (fast tile-packed)
+ *       5 = 4x4 tile mask + 81-state ternary joint delta + escapes
+ *   - Codec 0x05 (BTC_SAFE) uses frame sub-mode 6:
+ *       6 = 4x4 error-bounded BTC with 64B raw BGRA8888 escape
+ */
 typedef enum {
-    EAF4_MODE_RAW          = 0, /* Full-frame BGRA8888 Deflate (Keyframe, lossless) */
-    EAF4_MODE_XOR          = 1, /* Full-frame BGRA8888 32-bit XOR Deflate (lossless) */
-    EAF4_MODE_PLANAR       = 2, /* 0x0A 8888: 4-plane B/G/R/A XOR Deflate (lossless) */
-    EAF4_MODE_TILE_PLANAR  = 3, /* 0x0C 8888: 4x4 tile mask + 4-plane XOR Deflate (lossless) */
-    EAF4_MODE_TILE_PACKED  = 4, /* 4x4 tile mask + interleaved 32-bit BGRA word XOR Deflate (lossless, fast) */
-    EAF4_MODE_JOINT_DELTA  = 5, /* 0x0C joint ternary (-1..1)^4 symbol + 4-plane escape Deflate (lossless) */
-    EAF4_MODE_BTC8888_SAFE = 6, /* 0x09 8888: 4x4 error-bounded BTC with 64B raw BGRA escape */
-} eaf4_mode_t;
+    EAF4_SUBMODE_RAW          = 0,
+    EAF4_SUBMODE_XOR          = 1,
+    EAF4_SUBMODE_PLANAR       = 2,
+    EAF4_SUBMODE_TILE_PLANAR  = 3,
+    EAF4_SUBMODE_TILE_PACKED  = 4,
+    EAF4_SUBMODE_JOINT_DELTA  = 5,
+    EAF4_SUBMODE_BTC8888_SAFE = 6,
+} eaf4_submode_t;
+
+/* Backward-compatible aliases */
+#define EAF4_MODE_RAW          EAF4_SUBMODE_RAW
+#define EAF4_MODE_XOR          EAF4_SUBMODE_XOR
+#define EAF4_MODE_PLANAR       EAF4_SUBMODE_PLANAR
+#define EAF4_MODE_TILE_PLANAR  EAF4_SUBMODE_TILE_PLANAR
+#define EAF4_MODE_TILE_PACKED  EAF4_SUBMODE_TILE_PACKED
+#define EAF4_MODE_JOINT_DELTA  EAF4_SUBMODE_JOINT_DELTA
+#define EAF4_MODE_BTC8888_SAFE EAF4_SUBMODE_BTC8888_SAFE
 
 typedef struct eaf4 eaf4_t;
 typedef struct {

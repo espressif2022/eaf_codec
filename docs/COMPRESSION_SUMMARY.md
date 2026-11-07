@@ -1,35 +1,29 @@
-# EAF 压缩算法收敛与选型汇总（RGB565 `0x89 EAF` & BGRA8888 `EAF4`）
+# EAF 统一压缩规范与 565 / 8888 支持矩阵 (`0x00 ~ 0x07`)
 
-本仓库将 **RGB565 / RGB565A8 (`0x89 EAF`)** 与 **全四通道 8-bit BGRA8888 (`EAF4`)** 两套同源压缩算法收敛在同一个组件 `components/esp_lv_eaf_player` 和同一个命令行工具 `tools/eaf_cli.py` 中，通过文件头前 4 字节（`0x89 "EAF"` vs `"EAF4"`）自动识别并分发解码。
-
----
-
-## 一、同源算法架构与演进映射
-
-`EAF4 (BGRA8888)` 的核心模式直接从 `0x89 EAF (RGB565)` 的主力算法升维演进而来：
-
-1. **通道平面分离帧间差分（`0x0A Planar-Delta` $\rightarrow$ `EAF4 Mode 2 Planar-8888`）**
-   - **RGB565 (`0x0A`)**：将 16-bit 像素拆分为 `Low Byte` 与 `High Byte` 两个连续平面并做帧间 XOR。
-   - **BGRA8888 (`Mode 2`)**：将 32-bit 像素拆分为 `B, G, R, A` 四个独立 8-bit 平面并做帧间 XOR。
-2. **4×4 变化块掩码 + 无损差分（`0x0C Lossless-RGBA` $\rightarrow$ `EAF4 Modes 3 / 4 / 5`）**
-   - **RGB565A8 (`0x0C`)**：使用小端 4×4 变化块位图跳过静止区域，变化块支持三平面分离 (`Lo / Hi / A8`) 或 81 态三进制联合符号 (`Joint-Inter`)。
-   - **BGRA8888 (`Mode 3 Tile-Planar`)**：4×4 变化块位图 + B/G/R/A 四平面分离 XOR。
-   - **BGRA8888 (`Mode 4 Tile-Packed`)**：4×4 变化块位图 + **交错 32-bit BGRA 字直接 XOR**。免去四平面读取与移位拼字，复杂大面积动画还原速度提升 **30% ~ 42%**。
-   - **BGRA8888 (`Mode 5 Joint-Delta`)**：4×4 变化块位图 + 四通道小差分 $(\Delta B,\Delta G,\Delta R,\Delta A)\in[-1,1]^4$ 编码为单字节 81 态符号 (`0..80`，`255` 为逃逸) + 四平面逃逸流。在局部渐变/呼吸动效上体积比 `Mode 3` 再省 **15% ~ 30%**。
-3. **4×4 有界误差色胞截断（`0x09 BTC-Safe` $\rightarrow$ `EAF4 Mode 6 BTC8888-Safe`）**
-   - **RGB565 (`0x09`)**：每块 1 字节模式（`0=Skip`, `1=Flat 2B`, `2=2色 6B`, `3=4色线性插值 8B`, `4=Raw 32B RGB565 逃逸块`）。
-   - **BGRA8888 (`Mode 6`)**：完全同构扩展至 32-bit BGRA（`0=Skip 0B`, `1=Flat 4B`, `2=2色 10B`, `3=4色线性插值 12B`, `4=Raw 64B BGRA8888 逃逸块`）。严格锁定四通道单像素最大绝对误差 $\text{maxErr} \le 8$，消除色胞方块伪影，同时将复杂动画体积压缩至无损方案的 **22% ~ 35%**。
+本仓库将原有的 `RGB565 / RGB565A8` 与 `BGRA8888 / RGB888` 方案彻底收拢为一套 **连续无空洞的 8 项编码 ID (`0x00 ~ 0x07`)**：其中 `0x00 ~ 0x03` 保持与历史老资产 100% 字节兼容，**`0x04 ~ 0x07` 为正式收敛的 4 大正交生产主力**。
 
 ---
 
-## 二、收敛后的生产选型标准
+## 一、统一编码表与 565 / 8888 支持边界声明
 
-### 1. 当显示链路为 24/32-bit（需要全 8-bit Alpha 叠加或 PPA 硬件混合）$\rightarrow$ 选用 `EAF4` 容器
-- **通用 100% 无损首选**：`--container eaf4 --profile v2`（逐帧在 `Modes 0..5` 中自适应择优，兼顾最小无损体积与局部块跳过）。
-- **高负载双图层极速无损**：`--container eaf4 --profile tile_packed`（关键帧 `Mode 0` + 帧间 `Mode 4` 32-bit 整字异或，最大化 CPU 还原吞吐）。
-- **Flash 容量受限的复杂全屏动画**：`--container eaf4 --profile btc8888 --btc-max-error 8`（`Mode 6 BTC8888-Safe`，34x~72x 压缩比，PSNR `45~87 dB`）。
+| 编码 ID | 模式名 | 核心算法 | 565 格式 (`RGB565 / 565A8`) | 888/8888 格式 (`RGB888 / BGRA8888`) | 透明度支持声明 |
+| :---: | :--- | :--- | :--- | :--- | :--- |
+| **`0x00`** | `PALETTE_RLE` | 4/8-bit 调色板 + RLE | 支持（降采样为 `565+A8`） | **原生支持**（调色板存的就是 32-bit `BGRA8888`，直接查表直写） | 支持 8-bit 调色板 Alpha |
+| **`0x01`** | `PALETTE_HUFF_RLE` | 4/8-bit 调色板 + Huffman + RLE | 支持（降采样为 `565+A8`） | **原生支持**（32-bit `BGRA8888` 直出） | 支持 8-bit 调色板 Alpha |
+| **`0x02`** | `JPEG_KEYFRAME` | 标准整幅 JPEG（兼作 `0x06` 第 0 帧表头） | 支持（S31/P4 硬解 `hb` 对齐 + 软解） | **支持**（`RGB888 / BGRA8888`） | **不支持 Alpha**（仅不透明底图/关键帧） |
+| **`0x03`** | `PALETTE_HUFF` | 4/8-bit 调色板 + 直接 Huffman | 支持（降采样为 `565+A8`） | **原生支持**（32-bit `BGRA8888` 直出） | 支持 8-bit 调色板 Alpha |
+| **`0x04`** | **`LOSSLESS`** | **100% 逐比特无损**（首帧独立压缩，帧间 `4×4` 变化块位图 + 平面/32-bit字XOR/81态三进制联合符号自适应） | **原生支持** (`RGB565 + A8`) | **原生支持** (`BGRA8888`) | **完整 8-bit 连续无损 Alpha** |
+| **`0x05`** | **`BTC_SAFE`** | **空域极速有界误差色胞**（`4×4` Skip / Flat / 2色 / 4色线性插值 + 原始逃逸块，锁死 $\text{maxErr} \le 8$） | **原生支持** (`RGB565` + 32B 逃逸块) | **原生支持** (`BGRA8888` + 64B 逃逸块) | **8888 原生支持四通道 8-bit Alpha**<br>565 仅支持不透明或 1-bit Color-Key |
+| **`0x06`** | **`QUAD_JPEG`** | **频域变化块抽条带 JPEG**（`16×16` 宏块 + `8×8` 四象限掩码，变化块拼成 `height=16` 的 1D 条带 Abbrev-JPEG） | **原生支持** (`RGB565`) | **支持** (`RGB888 / BGRA8888`) | **不支持 Alpha**（JPEG 频域不支持透明通道，仅用于不透明自然光影/实拍动画） |
+| **`0x07`** | **`H264`** | **极限体积视频流**（Constrained Baseline Annex-B I/P 帧） | **原生支持** (`I420 -> RGB565` 查表) | **原生支持** (`I420 -> BGRA8888` 查表) | **不支持 Alpha**（YUV420 视频流仅用于不透明全屏动画） |
 
-### 2. 当显示链路为 16-bit `RGB565` $\rightarrow$ 选用 `0x89 EAF` 容器
-- **带 8-bit 连续 Alpha 前景无损**：`--container eaf565 --mode565 lossless-rgba` (`0x0C`)。
-- **不透明 / 1-bit 透明卡通与 UI 动效**：`--container eaf565 --mode565 btc-safe` (`0x09`)。
-- **自然实拍或柔光渐变**：`--container eaf565 --mode565 quad-abbrev` (`0x08`) 或 `h264` (`0x07`)。
+---
+
+## 二、关于 `0x06 QUAD_JPEG`（变化块抽成 JPEG）与硬件 JPEG 加速说明
+
+1. **为什么保留并对齐硬件 JPEG**：
+   - 在无透明通道的自然光影、柔光渐变、相机实拍类动画中，`0x06 QUAD_JPEG` 体积比 `BTC_SAFE` 小 **40% ~ 55%**，比无损小 **70%+**。
+2. **ESP32-S31 / ESP32-P4 硬件 JPEG 2D-DMA 宏块宽度对齐机制**：
+   - S31 / P4 的硬件 JPEG 引擎通过 2D-DMA 输出时，水平方向必须按固定宏块宽度 `hb` 对齐（`YUV420/422` 下 `hb = 32 px`，`YUV444` 下 RGB888 `hb = 40 px`、RGB565 `hb = 48 px`）。若条带宽度不整除 `hb`，硬件 DMA 会超时或写越界。
+   - **编码端已内置自动对齐**：`encoder/eaf565.py` 与 `encoder/quad_jpeg.py` 在将变化的 `8×8` 块打包为 `16×16` MCU 条带时，自动将 MCU 数量向上补齐到 `2`（`32 px`，对应 4:2:0/4:2:2）或 `3`（`48 px`，对应 4:4:4）的整数倍。
+   - **解码端安全门卫**：`esp_eaf_dec.c` 中的 `esp_eaf_jpeg_decode_hardware()` 调用 `jpeg_decoder_get_info()` 实时校验 `w % hb == 0 && h % 16 == 0` 且缓冲区 Cache Line 对齐后才启动硬件加速，否则无缝回退软件解码。

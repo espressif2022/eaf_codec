@@ -209,7 +209,7 @@ def convert_to_eaf(
     H, W, _ = arrs[0].shape
     if not (0 < W <= 65535 and 0 < H <= 65535):
         raise ValueError('Dimensions must fit the EAF uint16 header')
-    alignment = 4 if mode in ('btc-safe', 'btc-alpha', 'lossless-rgba') else 16 if mode == 'quad-abbrev' else 2 if mode == 'h264' else 1
+    alignment = 4 if mode in ('btc-safe', 'lossless', 'lossless-rgba') else 16 if mode in ('quad-jpeg', 'quad-abbrev') else 2 if mode == 'h264' else 1
     if W % alignment or H % alignment:
         raise ValueError(f'{mode} requires dimensions divisible by {alignment}')
     yy, xx = np.ogrid[:H, :W]
@@ -293,7 +293,7 @@ def convert_to_eaf(
                     continue
                 raw = bytes(modes + data)
                 co = zlib.compressobj(level=9, wbits=-15)
-                payloads.append(b'\x09' + struct.pack('<I', len(raw)) + co.compress(raw) + co.flush())
+                payloads.append(b'\x05' + struct.pack('<I', len(raw)) + co.compress(raw) + co.flush())
             frames_data.append(frame_bytes(W, H, stripe_h, payloads))
 
     elif mode == "h264":
@@ -336,7 +336,7 @@ def convert_to_eaf(
                     hdr += struct.pack('<HHHH', W, H, 1, H)
                     hdr += struct.pack('<I', len(block_data))
                     frames_data.append(bytes(hdr) + block_data)
-    elif mode == "quad-abbrev":
+    elif mode in ("quad-jpeg", "quad-abbrev"):
         assert W % 16 == 0 and H % 16 == 0, "Width and height must be multiples of 16"
         tiles_x = W // 16
         tiles_y = H // 16
@@ -379,7 +379,7 @@ def convert_to_eaf(
                         blocks_8x8.append(q_sub)
                         ref[ty+qy:ty+qy+8, tx+qx:tx+qx+8] = q_sub.copy()
                 if len(nibbles_list) == 0:
-                    block_data = b'\x08' + bytes(mask_bits)
+                    block_data = b'\x06' + bytes(mask_bits)
                 else:
                     nib_bytes = bytearray((len(nibbles_list) + 1) // 2)
                     for c_idx, nib in enumerate(nibbles_list):
@@ -398,11 +398,15 @@ def convert_to_eaf(
                         quad[8:16, 0:8] = chunk[2].astype(np.uint8)
                         quad[8:16, 8:16] = chunk[3].astype(np.uint8)
                         mcus.append(quad)
+                    # Pad MCU count so strip width (16 * N) aligns with S31/P4 HW JPEG 2D-DMA block width (hb=48 for 4:4:4, 32 for 4:2:2/4:2:0)
+                    mcu_align = 3 if jpeg_subsampling == 0 else 2
+                    while len(mcus) % mcu_align != 0:
+                        mcus.append(mcus[-1])
                     atlas = np.hstack(mcus)
                     buf = io.BytesIO()
                     Image.fromarray(atlas).save(buf, format='JPEG', quality=quality, optimize=False, subsampling=jpeg_subsampling)
                     scan_bytes = extract_scan_only(buf.getvalue())
-                    block_data = b'\x08' + bytes(mask_bits) + bytes(nib_bytes) + scan_bytes
+                    block_data = b'\x06' + bytes(mask_bits) + bytes(nib_bytes) + scan_bytes
             if i > 0 and auto_full_frame:
                 full = jpeg_block(f, quality, subsampling=jpeg_subsampling)
                 if len(full) < len(block_data):
@@ -413,118 +417,7 @@ def convert_to_eaf(
             hdr += struct.pack('<HHHH', W, H, 1, H)
             hdr += struct.pack('<I', len(block_data))
             frames_data.append(bytes(hdr) + block_data)
-    elif mode == "btc-alpha":
-        rgba_arrs = [np.array(Image.open(f).convert("RGBA"), dtype=np.int32) for f in files]
-        frames_rgba = np.stack(rgba_arrs, axis=0)
-        N = len(frames_rgba)
-        rgb = frames_rgba[..., :3].copy()
-        alpha = frames_rgba[..., 3].copy()
-        if circle_roi:
-            rgb[:, ~circle_mask] = 0
-            alpha[:, ~circle_mask] = 0
-
-        c_blocks = rgb.reshape(N, H // 4, 4, W // 4, 4, 3).transpose(0, 1, 3, 2, 4, 5).reshape(N, -1, 16, 3)
-        a_blocks = alpha.reshape(N, H // 4, 4, W // 4, 4).transpose(0, 1, 3, 2, 4).reshape(N, -1, 16)
-        # Only zero out RGB in 4x4 blocks that are 100% transparent; boundary blocks keep extrapolated RGB to avoid dark halos!
-        fully_transparent_blocks = a_blocks.max(axis=2) == 0
-        c_blocks[fully_transparent_blocks] = 0
-        num_tiles = c_blocks.shape[1]
-
-        prev_c565 = np.zeros((num_tiles, 16), dtype=np.uint16)
-        prev_a = np.zeros((num_tiles, 16), dtype=np.int32) - 1000
-
-        for f_idx in range(N):
-            cur_c = c_blocks[f_idx]
-            cur_a = a_blocks[f_idx]
-            if f_idx == 0 or (keyframe_interval and f_idx % keyframe_interval == 0):
-                prev_a[:] = -1000
-
-            diff_a = np.max(np.abs(cur_a - prev_a), axis=1)
-            prev_c_rgb = rgb565_components(prev_c565)
-            diff_c = np.max(np.abs(cur_c - prev_c_rgb), axis=(1, 2))
-
-            skip = (diff_a <= max(1, btc_th // 2)) & (diff_c <= btc_th)
-            c_span = np.max(cur_c.max(axis=1) - cur_c.min(axis=1), axis=1)
-            a_span = cur_a.max(axis=1) - cur_a.min(axis=1)
-            flat = (~skip) & (c_span <= btc_th) & (a_span <= max(2, btc_th // 2))
-            interp = (~skip) & (~flat)
-
-            modes = np.zeros(num_tiles, dtype=np.uint8)
-            modes[flat] = 1
-            modes[interp] = 3
-            packed_modes = (modes[0::4]) | (modes[1::4] << 2) | (modes[2::4] << 4) | (modes[3::4] << 6)
-
-            flat_c = rgb_to_565_arr(cur_c[flat].mean(axis=1).astype(np.int32)).astype("<u2")
-            flat_a = cur_a[flat].mean(axis=1).round().astype(np.uint8)
-
-            ic_a = cur_a[interp]
-            a0 = ic_a.min(axis=1).astype(np.int32)
-            a3 = ic_a.max(axis=1).astype(np.int32)
-            a1 = (2 * a0 + a3) // 3
-            a2 = (a0 + 2 * a3) // 3
-            pal_a = np.stack([a0, a1, a2, a3], axis=1)
-            idx_a = np.argmin(np.abs(ic_a[:, :, None] - pal_a[:, None, :]), axis=2).astype(np.uint32)
-            mask_a = np.zeros(idx_a.shape[0], dtype=np.uint32)
-            for p_i in range(16):
-                mask_a |= (idx_a[:, p_i] << (2 * p_i))
-            interp_a = np.stack([a0.astype(np.uint8), a3.astype(np.uint8)], axis=1)
-
-            ic_c = cur_c[interp]
-            if len(ic_c) > 0:
-                ptp = np.ptp(ic_c, axis=1)
-                axis = np.argmax(ptp, axis=1)
-                b_idx = np.arange(len(ic_c))
-                vals_axis = ic_c[b_idx[:, None], np.arange(16)[None, :], axis[:, None]]
-                min_i = np.argmin(vals_axis, axis=1)
-                max_i = np.argmax(vals_axis, axis=1)
-                c0_565 = rgb_to_565_arr(ic_c[b_idx, min_i]).astype(np.uint16)
-                c3_565 = rgb_to_565_arr(ic_c[b_idx, max_i]).astype(np.uint16)
-                ch0 = rgb565_components(c0_565) // np.array([8, 4, 8])
-                ch3 = rgb565_components(c3_565) // np.array([8, 4, 8])
-                ch1 = (2 * ch0 + ch3) // 3
-                ch2 = (ch0 + 2 * ch3) // 3
-                pal_c_rgb = np.stack([ch0, ch1, ch2, ch3], axis=1) * np.array([8, 4, 8])
-                dist_c = np.sum((ic_c[:, :, None, :] - pal_c_rgb[:, None, :, :]) ** 2, axis=3)
-                idx_c = np.argmin(dist_c, axis=2).astype(np.uint32)
-                mask_c = np.zeros(idx_c.shape[0], dtype=np.uint32)
-                for p_i in range(16):
-                    mask_c |= (idx_c[:, p_i] << (2 * p_i))
-                interp_c = np.stack([c0_565, c3_565], axis=1).astype("<u2")
-
-                pal_c565 = np.stack([
-                    c0_565,
-                    ((ch1[:, 0] << 11) | (ch1[:, 1] << 5) | ch1[:, 2]).astype(np.uint16),
-                    ((ch2[:, 0] << 11) | (ch2[:, 1] << 5) | ch2[:, 2]).astype(np.uint16),
-                    c3_565,
-                ], axis=1)
-                prev_c565[interp] = pal_c565[b_idx[:, None], idx_c]
-                prev_a[interp] = pal_a[b_idx[:, None], idx_a]
-            else:
-                interp_c = np.zeros((0, 2), dtype="<u2")
-                mask_c = np.zeros((0,), dtype="<u4")
-
-            prev_c565[flat] = flat_c[:, None]
-            prev_a[flat] = flat_a[:, None]
-
-            n_flat = int(np.sum(flat))
-            n_interp = int(np.sum(interp))
-            if n_flat == 0 and n_interp == 0:
-                frames_data.append(frame_bytes(W, H, H, [b""]))
-                continue
-            raw = (
-                packed_modes.tobytes()
-                + flat_c.tobytes()
-                + flat_a.tobytes()
-                + interp_c.tobytes()
-                + interp_a.tobytes()
-                + mask_c.astype("<u4").tobytes()
-                + mask_a.astype("<u4").tobytes()
-            )
-            co = zlib.compressobj(level=9, wbits=-15)
-            comp = co.compress(raw) + co.flush()
-            block = b"\x0b" + struct.pack("<IHH", len(raw), n_flat, n_interp) + comp
-            frames_data.append(frame_bytes(W, H, H, [block]))
-    elif mode == "lossless-rgba":
+    elif mode in ("lossless", "lossless-rgba"):
         rgba_arrs = [np.array(Image.open(f).convert("RGBA"), dtype=np.int32) for f in files]
         frames_rgba = np.stack(rgba_arrs, axis=0)
         N = len(frames_rgba)
@@ -576,7 +469,7 @@ def convert_to_eaf(
             raw = mask_bits.tobytes() + c_low + c_high + a_bytes
             co = zlib.compressobj(level=9, wbits=-15)
             comp = co.compress(raw) + co.flush()
-            block = b"\x0c" + struct.pack("<BIH", flags, len(raw), n_changed) + comp
+            block = b"\x04" + struct.pack("<BIH", flags, len(raw), n_changed) + comp
             frames_data.append(frame_bytes(W, H, H, [block]))
     else:
         raise ValueError(f"Unknown mode: {mode}")
@@ -590,9 +483,9 @@ if __name__ == "__main__":
     parser.add_argument("-o", "--output", required=True, help="Output .eaf file path")
     parser.add_argument(
         "--mode",
-        choices=["lossless-rgba", "btc-safe", "quad-abbrev", "h264", "btc-alpha", "jpeg", "strip-delta"],
+        choices=["lossless", "btc-safe", "quad-jpeg", "h264"],
         default="btc-safe",
-        help="Active production modes: lossless-rgba (0x0C), btc-safe (0x09), quad-abbrev (0x08), h264 (0x07), btc-alpha (0x0B)",
+        help="4 converged production modes: lossless (0x04), btc-safe (0x05), quad-jpeg (0x06), h264 (0x07)",
     )
     parser.add_argument("--fps", type=int, default=15)
     parser.add_argument("--width", type=int, default=240)

@@ -23,6 +23,7 @@
 #include <stddef.h>
 #include <stdbool.h>
 #include "esp_err.h"
+#include "esp_eaf_codec.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -111,29 +112,26 @@ typedef enum {
 } esp_eaf_format_t;
 
 /**
- * @brief EAF encoding type enumeration
+ * @brief Converged EAF encoding type enumeration (0x00 .. 0x07, zero gaps)
  */
 typedef enum {
-    /* Legacy v1.0 / v2.0 compatibility codecs (retained for existing .eaf assets) */
-    ESP_EAF_ENCODING_RLE = 0,           /*!< [Legacy Compat] 4/8-bit Palette Run-Length Encoding */
-    ESP_EAF_ENCODING_HUFFMAN = 1,       /*!< [Legacy Compat] Huffman + RLE Palette Encoding */
-    ESP_EAF_ENCODING_JPEG = 2,          /*!< [Internal Keyframe / Legacy] Standard / Strip JPEG */
-    ESP_EAF_ENCODING_HUFFMAN_DIRECT = 3, /*!< [Legacy Compat] Direct Huffman without RLE */
+    /* Legacy v1.0 / v2.0 compatibility & internal keyframe codecs (0x00 .. 0x03) */
+    ESP_EAF_ENCODING_RLE            = 0x00, /*!< [Legacy Compat] 4/8-bit Palette Run-Length Encoding */
+    ESP_EAF_ENCODING_HUFFMAN        = 0x01, /*!< [Legacy Compat] Huffman + RLE Palette Encoding */
+    ESP_EAF_ENCODING_JPEG           = 0x02, /*!< [Internal Keyframe] Full-frame / Strip JPEG */
+    ESP_EAF_ENCODING_HUFFMAN_DIRECT = 0x03, /*!< [Legacy Compat] Direct Huffman without RLE */
 
-    /* Deprecated transitional codecs (superseded by 0x08 / 0x09 / 0x0C) */
-    ESP_EAF_ENCODING_TILE_JPEG = 4,      /*!< [Deprecated -> use 0x08] 16x16 Tile-Atlas Delta JPEG */
-    ESP_EAF_ENCODING_TILE_ABBREV = 5,    /*!< [Deprecated -> use 0x08] 16x16 1D-Strip Abbreviated JPEG */
-    ESP_EAF_ENCODING_BTC_ZLIB = 6,       /*!< [Merged -> use 0x09] 4x4 Delta-BTC without escape block */
-
-    /* Converged Production Standard Codecs */
-    ESP_EAF_ENCODING_H264 = 7,           /*!< [Core] H.264 Constrained Baseline Access Unit (I420 -> RGB565) */
-    ESP_EAF_ENCODING_QUAD_ABBREV = 8,    /*!< [Core] Two-Level Quadtree 8x8/16x16 Abbreviated JPEG */
-    ESP_EAF_ENCODING_BTC_SAFE = 9,       /*!< [Core] Error-Bounded 4x4 Delta-BTC + 32B Verbatim Escape */
-    ESP_EAF_ENCODING_PLANAR_DELTA = 10,  /*!< [Core] Lossless RGB565 Byte-Planes + Temporal XOR / Row Delta */
-    ESP_EAF_ENCODING_BTC_ALPHA = 11,     /*!< [Optional Lossy Alpha] 4x4 Delta-BTC + BC4/DXT5 8-bit Alpha */
-    ESP_EAF_ENCODING_LOSSLESS_RGBA = 12, /*!< [Core Alpha] 100% Bit-Exact Lossless 3-Plane RGB565_Lo/Hi + A8 */
-    ESP_EAF_ENCODING_MAX                 /*!< Maximum number of encoding types */
+    /* 4 Converged Production Standard Codecs (0x04 .. 0x07) */
+    ESP_EAF_ENCODING_LOSSLESS       = 0x04, /*!< [Core 1] 100% Bit-Exact Lossless (565+A8 / BGRA8888) */
+    ESP_EAF_ENCODING_BTC_SAFE       = 0x05, /*!< [Core 2] Error-Bounded 4x4 Delta-BTC + Raw Escape */
+    ESP_EAF_ENCODING_QUAD_JPEG      = 0x06, /*!< [Core 3] Two-Level Quadtree 8x8/16x16 Abbreviated Strip JPEG */
+    ESP_EAF_ENCODING_H264           = 0x07, /*!< [Core 4] H.264 Constrained Baseline Access Unit */
+    ESP_EAF_ENCODING_MAX            = 0x08  /*!< Maximum number of encoding types */
 } esp_eaf_encoding_t;
+
+/* Backward compatibility aliases */
+#define ESP_EAF_ENCODING_LOSSLESS_RGBA ESP_EAF_ENCODING_LOSSLESS
+#define ESP_EAF_ENCODING_QUAD_ABBREV   ESP_EAF_ENCODING_QUAD_JPEG
 
 /**
  * @brief EAF image header structure
@@ -183,6 +181,7 @@ void esp_eaf_decoder_get_planar_stats(const esp_eaf_decoder_t *decoder, esp_eaf_
  * Returns the reserved size (0 if the allocation failed). */
 size_t esp_eaf_decoder_reserve_internal_scratch(esp_eaf_decoder_t *decoder, size_t size);
 void esp_eaf_decoder_set_fused_blend(esp_eaf_decoder_t *decoder, const uint16_t *bg_rgb565, uint16_t *comp_rgb565);
+void esp_eaf_decoder_set_output_format(esp_eaf_decoder_t *decoder, esp_eaf_output_format_t out_fmt);
 
 /**********************
  *  HEADER OPERATIONS

@@ -661,7 +661,7 @@ static bool eaf_has_alpha_palette(esp_eaf_format_handle_t handle)
             }
         } else if (header.bit_depth == 24 && header.blocks > 0 && header.block_len[0] > 0) {
             uint8_t enc = frame_data[header.data_offset];
-            if (enc == ESP_EAF_ENCODING_BTC_ALPHA || enc == ESP_EAF_ENCODING_LOSSLESS_RGBA) {
+            if (enc == ESP_EAF_ENCODING_LOSSLESS || enc == 0x0C) {
                 found_alpha = true;
             }
         }
@@ -828,8 +828,8 @@ static esp_err_t decode_current_frame(lv_eaf_t * eaf_obj)
     /* Clear frame buffer on frame 0 or when non-delta palette alpha channel is used */
     bool is_delta_alpha = (eaf_obj->eaf_header.bit_depth == 24 && eaf_obj->eaf_header.blocks > 0 &&
                            eaf_obj->eaf_header.block_len[0] > 0 &&
-                           (frame_data[eaf_obj->eaf_header.data_offset] == ESP_EAF_ENCODING_BTC_ALPHA ||
-                            frame_data[eaf_obj->eaf_header.data_offset] == ESP_EAF_ENCODING_LOSSLESS_RGBA));
+                           (frame_data[eaf_obj->eaf_header.data_offset] == ESP_EAF_ENCODING_LOSSLESS ||
+                            frame_data[eaf_obj->eaf_header.data_offset] == 0x0C));
     if (eaf_obj->current_frame == 0 || (eaf_obj->has_palette_alpha && !is_delta_alpha)) {
         memset(eaf_obj->frame_buffer, 0, eaf_obj->frame_buffer_size);
     }

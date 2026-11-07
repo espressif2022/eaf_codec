@@ -34,12 +34,18 @@ FRAME_PALETTE_ENTRY_SIZE = 4
 
 BIT_DEPTHS = {4, 8, 24}
 ENCODING_NAMES = {
-    0: "RLE",
-    1: "HUFFMAN_RLE",
-    2: "JPEG",
-    3: "HUFFMAN_DIRECT",
-    4: "HEATSHRINK",
-    5: "RAW",
+    0: "PALETTE_RLE",
+    1: "PALETTE_HUFF_RLE",
+    2: "JPEG_KEYFRAME",
+    3: "PALETTE_HUFF",
+    4: "LOSSLESS",
+    5: "BTC_SAFE",
+    6: "QUAD_JPEG",
+    7: "H264",
+    # Legacy pre-convergence IDs
+    8: "QUAD_JPEG_LEGACY",
+    9: "BTC_SAFE_LEGACY",
+    12: "LOSSLESS_LEGACY",
 }
 DEFAULT_ISSUE_FRAME_LIMIT = 20
 
@@ -345,9 +351,7 @@ def decode_block_payload(encoding: int, payload: bytes, expected_size: int) -> t
     if encoding == 5:
         decoded, errors = raw_decode(payload, expected_size)
         return len(decoded), not errors, errors
-    if encoding == 2:
-        return 0, None, []
-    if encoding == 4:
+    if encoding in (2, 4, 5, 6, 7, 8, 9, 12):
         return 0, None, []
     return 0, False, [f"未知 encoding type：0x{encoding:02X}"]
 

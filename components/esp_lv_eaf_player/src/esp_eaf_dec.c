@@ -43,6 +43,7 @@ static int16_t s_bu_lut[256];
 static uint16_t s_r565_clamp[1024];
 static uint16_t s_g565_clamp[1024];
 static uint16_t s_b565_clamp[1024];
+static uint8_t s_u8_clamp[1024];
 
 static void esp_eaf_init_yuv_luts(void)
 {
@@ -61,11 +62,52 @@ static void esp_eaf_init_yuv_luts(void)
         int v = i - 384;
         if (v < 0) v = 0;
         if (v > 255) v = 255;
+        s_u8_clamp[i] = (uint8_t)v;
         s_r565_clamp[i] = (uint16_t)((v & 0xF8) << 8);
         s_g565_clamp[i] = (uint16_t)((v & 0xFC) << 3);
         s_b565_clamp[i] = (uint16_t)(v >> 3);
     }
     s_yuv_lut_inited = true;
+}
+
+static inline uint32_t esp_eaf_yuv_lut_bgra8888(int y, int rd, int gd, int bd)
+{
+    y = s_y_lut[y];
+    uint8_t b = s_u8_clamp[y + bd + 384];
+    uint8_t g = s_u8_clamp[y - gd + 384];
+    uint8_t r = s_u8_clamp[y + rd + 384];
+    return (uint32_t)b | ((uint32_t)g << 8) | ((uint32_t)r << 16) | 0xFF000000U;
+}
+
+static void esp_eaf_i420_to_bgra8888(const uint8_t *i420, int width, int height, uint32_t *bgra)
+{
+    esp_eaf_init_yuv_luts();
+    const uint8_t *y_plane = i420;
+    const uint8_t *u_plane = i420 + width * height;
+    const uint8_t *v_plane = u_plane + (width * height >> 2);
+    int uv_stride = width >> 1;
+
+    for (int y = 0; y < height; y += 2) {
+        const uint8_t *y_row0 = y_plane + y * width;
+        const uint8_t *y_row1 = y_row0 + width;
+        const uint8_t *u_row  = u_plane + (y >> 1) * uv_stride;
+        const uint8_t *v_row  = v_plane + (y >> 1) * uv_stride;
+        uint32_t *dst0 = bgra + y * width;
+        uint32_t *dst1 = bgra + (y + 1) * width;
+
+        for (int x = 0; x < width; x += 2) {
+            uint8_t u = u_row[x >> 1];
+            uint8_t v = v_row[x >> 1];
+            int rd = s_rv_lut[v];
+            int gd = s_gu_lut[u] + s_gv_lut[v];
+            int bd = s_bu_lut[u];
+
+            dst0[x]     = esp_eaf_yuv_lut_bgra8888(y_row0[x],     rd, gd, bd);
+            dst0[x + 1] = esp_eaf_yuv_lut_bgra8888(y_row0[x + 1], rd, gd, bd);
+            dst1[x]     = esp_eaf_yuv_lut_bgra8888(y_row1[x],     rd, gd, bd);
+            dst1[x + 1] = esp_eaf_yuv_lut_bgra8888(y_row1[x + 1], rd, gd, bd);
+        }
+    }
 }
 
 static inline uint16_t esp_eaf_yuv_lut_px(int y, int rd, int gd, int bd)
@@ -147,6 +189,7 @@ struct esp_eaf_decoder {
     esp_eaf_planar_stats_t predictor_stats;
     const uint16_t *fused_bg_rgb565;
     uint16_t *fused_comp_rgb565;
+    esp_eaf_output_format_t out_fmt;
 #if ESP_LV_EAF_ENABLE_H264
     esp_h264_dec_handle_t h264;
 #endif
@@ -171,6 +214,7 @@ void esp_eaf_decoder_reset(esp_eaf_decoder_t *decoder)
     esp_eaf_planar_stats_t stats = decoder->predictor_stats;
     const uint16_t *fused_bg = decoder->fused_bg_rgb565;
     uint16_t *fused_comp = decoder->fused_comp_rgb565;
+    esp_eaf_output_format_t out_fmt = decoder->out_fmt;
     if (decoder->predictor_z_ready) inflateEnd(&decoder->predictor_z);
 #if ESP_LV_EAF_ENABLE_H264
     if (decoder->h264) {
@@ -188,6 +232,14 @@ void esp_eaf_decoder_reset(esp_eaf_decoder_t *decoder)
     decoder->predictor_stats = stats;
     decoder->fused_bg_rgb565 = fused_bg;
     decoder->fused_comp_rgb565 = fused_comp;
+    decoder->out_fmt = out_fmt;
+}
+
+void esp_eaf_decoder_set_output_format(esp_eaf_decoder_t *decoder, esp_eaf_output_format_t out_fmt)
+{
+    if (decoder) {
+        decoder->out_fmt = out_fmt;
+    }
 }
 
 size_t esp_eaf_decoder_reserve_internal_scratch(esp_eaf_decoder_t *decoder, size_t size)
@@ -1065,210 +1117,16 @@ esp_err_t esp_eaf_block_decode_ctx(esp_eaf_decoder_t *decoder, const esp_eaf_hea
         return ESP_OK;
     }
     uint8_t encoding_type = block_data[0];
+    /* Normalize legacy pre-convergence bytecodes (0x08/0x09/0x0C) to contiguous 0x04..0x07 */
+    if (encoding_type == 0x0C) encoding_type = ESP_EAF_ENCODING_LOSSLESS;
+    else if (encoding_type == 0x09) encoding_type = ESP_EAF_ENCODING_BTC_SAFE;
+    else if (encoding_type == 0x08) encoding_type = ESP_EAF_ENCODING_QUAD_JPEG;
 
     esp_err_t decode_result = ESP_FAIL;
 
-    if ((encoding_type == ESP_EAF_ENCODING_TILE_JPEG || encoding_type == ESP_EAF_ENCODING_TILE_ABBREV ||
-         encoding_type == ESP_EAF_ENCODING_QUAD_ABBREV) &&
+    if (encoding_type == ESP_EAF_ENCODING_QUAD_JPEG &&
         (width % 16 || block_height % 16 || header->blocks != 1)) {
         return ESP_ERR_INVALID_SIZE;
-    }
-    if (encoding_type == ESP_EAF_ENCODING_TILE_JPEG || encoding_type == ESP_EAF_ENCODING_TILE_ABBREV) {
-        /* 16x16 Tile-Atlas Delta JPEG: first 29 bytes = 225-bit tile mask, followed by packed JPEG or abbreviated scan */
-        int tiles_x = width / 16;
-        int tiles_y = block_height / 16;
-        int total_tiles = tiles_x * tiles_y;
-        int mask_bytes = (total_tiles + 7) / 8;
-        if (block_len < 1 + mask_bytes) {
-            return ESP_FAIL;
-        }
-        const uint8_t *mask = block_data + 1;
-        int changed_tiles = 0;
-        uint16_t min_x = width, min_y = header->height, max_x = 0, max_y = 0;
-        for (int t = 0; t < total_tiles; t++) {
-            if (mask[t >> 3] & (1 << (t & 7))) {
-                changed_tiles++;
-                uint16_t ty = (t / tiles_x) * 16;
-                uint16_t tx = (t % tiles_x) * 16;
-                if (tx < min_x) min_x = tx;
-                if (ty < min_y) min_y = ty;
-                if (tx + 15 > max_x) max_x = tx + 15;
-                if (ty + 15 > max_y) max_y = ty + 15;
-            }
-        }
-        if (changed_tiles == 0) {
-            return ESP_OK;
-        }
-        decoder->dirty.x1 = min_x;
-        decoder->dirty.y1 = min_y;
-        decoder->dirty.x2 = max_x;
-        decoder->dirty.y2 = max_y;
-        decoder->dirty.valid = true;
-
-        const uint8_t *jpg_ptr = block_data + 1 + mask_bytes;
-        size_t jpg_len = block_len - 1 - mask_bytes;
-        int ncols = (encoding_type == ESP_EAF_ENCODING_TILE_ABBREV) ? changed_tiles : (changed_tiles < tiles_x ? changed_tiles : tiles_x);
-        int nrows = (encoding_type == ESP_EAF_ENCODING_TILE_ABBREV) ? 1 : ((changed_tiles + ncols - 1) / ncols);
-        int atlas_w = ncols * 16;
-        int atlas_h = nrows * 16;
-        size_t atlas_size = (size_t)atlas_w * atlas_h * 2;
-        size_t alloc_sz = 0;
-        uint8_t *atlas_buf = (uint8_t *)esp_eaf_malloc_aligned_prefer_psram(atlas_size, 0, &alloc_sz);
-        if (!atlas_buf) {
-            return ESP_ERR_NO_MEM;
-        }
-
-        uint8_t *rebuilt_jpg = NULL;
-        if (encoding_type == ESP_EAF_ENCODING_TILE_ABBREV) {
-            if (decoder->jpeg_hdr_len == 0 || decoder->sof0_offset < 0) {
-                free(atlas_buf);
-                return ESP_FAIL;
-            }
-            size_t full_len = decoder->jpeg_hdr_len + jpg_len + 2;
-            rebuilt_jpg = (uint8_t *)esp_eaf_malloc_prefer_psram(full_len);
-            if (!rebuilt_jpg) {
-                free(atlas_buf);
-                return ESP_ERR_NO_MEM;
-            }
-            memcpy(rebuilt_jpg, decoder->jpeg_hdr, decoder->jpeg_hdr_len);
-            rebuilt_jpg[decoder->sof0_offset + 5] = (atlas_h >> 8) & 0xFF;
-            rebuilt_jpg[decoder->sof0_offset + 6] = atlas_h & 0xFF;
-            rebuilt_jpg[decoder->sof0_offset + 7] = (atlas_w >> 8) & 0xFF;
-            rebuilt_jpg[decoder->sof0_offset + 8] = atlas_w & 0xFF;
-            memcpy(rebuilt_jpg + decoder->jpeg_hdr_len, jpg_ptr, jpg_len);
-            rebuilt_jpg[decoder->jpeg_hdr_len + jpg_len] = 0xFF;
-            rebuilt_jpg[decoder->jpeg_hdr_len + jpg_len + 1] = 0xD9;
-            jpg_ptr = rebuilt_jpg;
-            jpg_len = full_len;
-        }
-
-        size_t dec_sz = alloc_sz;
-        decode_result = esp_eaf_jpeg_decode(jpg_ptr, jpg_len, atlas_buf, &dec_sz, swap_color);
-        if (rebuilt_jpg) {
-            free(rebuilt_jpg);
-        }
-        if (decode_result == ESP_OK && dec_sz != atlas_size) decode_result = ESP_ERR_INVALID_SIZE;
-        if (decode_result == ESP_OK) {
-            int k = 0;
-            for (int t = 0; t < total_tiles; t++) {
-                if (mask[t >> 3] & (1 << (t & 7))) {
-                    int ty = (t / tiles_x) * 16;
-                    int tx = (t % tiles_x) * 16;
-                    int ar = (k / ncols) * 16;
-                    int ac = (k % ncols) * 16;
-                    for (int row = 0; row < 16; row++) {
-                        uint8_t *dst_row = decode_buffer + ((ty + row) * width + tx) * 2;
-                        const uint8_t *src_row = atlas_buf + ((ar + row) * atlas_w + ac) * 2;
-                        memcpy(dst_row, src_row, 16 * 2);
-                    }
-                    k++;
-                }
-            }
-        }
-        free(atlas_buf);
-        return decode_result;
-    }
-
-    if (encoding_type == ESP_EAF_ENCODING_PLANAR_DELTA) {
-        /* Full frame: type(1), flags(1), raw Deflate of low plane then high plane.
-         * flags bit 0: XOR previous RGB565; bit 1: uint16 horizontal difference.
-         * Only even widths are supported, so pairs can be restored with word copies.
-         */
-        if (block_len < 3 || header->blocks != 1 || width % 2 || block_data[1] > 3) {
-            return ESP_ERR_INVALID_SIZE;
-        }
-        unsigned mode = block_data[1];
-        size_t pixels = (size_t)width * block_height;
-        if (pixels > SIZE_MAX / 2) return ESP_ERR_INVALID_SIZE;
-        size_t raw_len = pixels * 2;
-        if (raw_len > UINT_MAX || block_len - 2 > UINT_MAX) return ESP_ERR_INVALID_SIZE;
-        bool previous_valid = decoder->predictor_ready && decoder->predictor_width == width &&
-                              decoder->predictor_height == block_height && decoder->predictor_swap == swap_color;
-        decoder->predictor_ready = false;
-        if ((mode & 1) && !previous_valid) return ESP_ERR_INVALID_STATE;
-        if (decoder->predictor_capacity < raw_len) {
-            free(decoder->predictor_scratch);
-            decoder->predictor_capacity = 0;
-            decoder->predictor_scratch = heap_caps_malloc(raw_len, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-            bool internal = decoder->predictor_scratch != NULL;
-            if (!decoder->predictor_scratch) {
-                decoder->predictor_scratch = esp_eaf_malloc_prefer_psram(raw_len);
-            }
-            if (!decoder->predictor_scratch) return ESP_ERR_NO_MEM;
-            decoder->predictor_capacity = raw_len;
-            ESP_LOGI(TAG, "PLANAR_BUFFER bytes=%u memory=%s", (unsigned)raw_len, internal ? "internal" : "fallback");
-        }
-        uint8_t *raw = decoder->predictor_scratch;
-        int64_t inflate_start = esp_timer_get_time();
-        if (decoder->predictor_rom) {
-            if (tinfl_decompress_mem_to_mem(raw, raw_len, block_data + 2, block_len - 2, 0) != raw_len) return ESP_FAIL;
-        } else {
-            z_stream *z = &decoder->predictor_z;
-            if (!decoder->predictor_z_ready) {
-                z->zalloc = planar_zalloc;
-                z->zfree = planar_zfree;
-                if (inflateInit2(z, -15) != Z_OK) return ESP_ERR_NO_MEM;
-                decoder->predictor_z_ready = true;
-            } else if (inflateReset(z) != Z_OK) return ESP_FAIL;
-            z->next_in = (Bytef *)(block_data + 2);
-            z->avail_in = block_len - 2;
-            z->next_out = raw;
-            z->avail_out = raw_len;
-            if (inflate(z, Z_FINISH) != Z_STREAM_END || z->total_out != raw_len || z->avail_in != 0) return ESP_FAIL;
-        }
-        int64_t restore_start = esp_timer_get_time();
-        uint16_t *fb = (uint16_t *)decode_buffer;
-        size_t pos = 0;
-        if (!decoder->predictor_rom && !(mode & 2) && !swap_color && ((uintptr_t)fb & 3) == 0) {
-            /* malloc scratch is aligned; even width keeps the high plane aligned.
-             * may_alias permits word stores into the caller's RGB565 framebuffer.
-             */
-            typedef uint16_t alias16 __attribute__((__may_alias__));
-            typedef uint32_t alias32 __attribute__((__may_alias__));
-            const alias16 *low = (const alias16 *)raw;
-            const alias16 *high = (const alias16 *)(raw + pixels);
-            alias32 *dst = (alias32 *)fb;
-            if (mode & 1) {
-                for (size_t i = 0; i < pixels / 2; i++) {
-                    uint32_t l = low[i], h = high[i];
-                    dst[i] ^= (l & 255) | ((h & 255) << 8) | ((l & 0xff00) << 8) | ((h & 0xff00) << 16);
-                }
-            } else {
-                for (size_t i = 0; i < pixels / 2; i++) {
-                    uint32_t l = low[i], h = high[i];
-                    dst[i] = (l & 255) | ((h & 255) << 8) | ((l & 0xff00) << 8) | ((h & 0xff00) << 16);
-                }
-            }
-        } else {
-        for (int y = 0; y < block_height; y++) {
-            uint16_t acc = 0;
-            for (int x = 0; x < width; x += 2, pos += 2) {
-                uint16_t a = raw[pos] | ((uint16_t)raw[pixels + pos] << 8);
-                uint16_t b = raw[pos + 1] | ((uint16_t)raw[pixels + pos + 1] << 8);
-                if (mode & 2) { acc += a; a = acc; acc += b; b = acc; }
-                uint32_t pair = (uint32_t)a | ((uint32_t)b << 16);
-                if (swap_color) pair = ((pair & 0x00ff00ffu) << 8) | ((pair & 0xff00ff00u) >> 8);
-                if (mode & 1) {
-                    uint32_t previous;
-                    memcpy(&previous, fb + pos, sizeof(previous));
-                    pair ^= previous;
-                }
-                memcpy(fb + pos, &pair, sizeof(pair));
-            }
-        }
-        }
-        decoder->predictor_stats.inflate_us += restore_start - inflate_start;
-        decoder->predictor_stats.restore_us += esp_timer_get_time() - restore_start;
-        decoder->predictor_stats.frames++;
-        decoder->predictor_ready = true;
-        decoder->predictor_width = width;
-        decoder->predictor_height = block_height;
-        decoder->predictor_swap = swap_color;
-        decoder->dirty.x1 = decoder->dirty.y1 = 0;
-        decoder->dirty.x2 = width - 1;
-        decoder->dirty.y2 = block_height - 1;
-        decoder->dirty.valid = true;
-        return ESP_OK;
     }
 
     if (encoding_type == ESP_EAF_ENCODING_BTC_SAFE) {
@@ -1292,6 +1150,8 @@ esp_err_t esp_eaf_block_decode_ctx(esp_eaf_decoder_t *decoder, const esp_eaf_hea
         if (expected != raw_len) { free(raw); return ESP_ERR_INVALID_SIZE; }
         const uint8_t *p = raw + tiles;
         uint16_t *fb = (uint16_t *)decode_buffer;
+        uint32_t *fb32 = (uint32_t *)decode_buffer;
+        bool out_8888 = (decoder->out_fmt == ESP_EAF_OUT_BGRA8888);
         for (size_t t = 0; t < tiles; t++) {
             unsigned mode = raw[t];
             if (!mode) continue;
@@ -1312,7 +1172,15 @@ esp_err_t esp_eaf_block_decode_ctx(esp_eaf_decoder_t *decoder, const esp_eaf_hea
             for (int pixel = 0; pixel < 16; pixel++) {
                 uint16_t color = mode == 4 ? read_le16(p + pixel * 2) :
                     pal[mode == 1 ? 0 : mode == 2 ? ((mask >> pixel) & 1) : ((mask >> (pixel * 2)) & 3)];
-                fb[(ty + pixel / 4) * width + tx + pixel % 4] = swap_color ? __builtin_bswap16(color) : color;
+                size_t idx = (size_t)(ty + pixel / 4) * width + tx + pixel % 4;
+                if (out_8888) {
+                    uint8_t r8 = (uint8_t)(((color >> 11) & 0x1F) * 255 / 31);
+                    uint8_t g8 = (uint8_t)(((color >> 5) & 0x3F) * 255 / 63);
+                    uint8_t b8 = (uint8_t)((color & 0x1F) * 255 / 31);
+                    fb32[idx] = (uint32_t)b8 | ((uint32_t)g8 << 8) | ((uint32_t)r8 << 16) | 0xFF000000U;
+                } else {
+                    fb[idx] = swap_color ? __builtin_bswap16(color) : color;
+                }
             }
             p += sizes[mode];
             int frame_y = ty + block_index * header->block_height;
@@ -1326,299 +1194,7 @@ esp_err_t esp_eaf_block_decode_ctx(esp_eaf_decoder_t *decoder, const esp_eaf_hea
         return ESP_OK;
     }
 
-    if (encoding_type == ESP_EAF_ENCODING_BTC_ZLIB) {
-        /* 4x4 Adaptive Delta-BTC + ESP32 ROM tinfl_decompress_mem_to_mem:
-         * Header after encoding_type(1B):
-         *   uint16_t raw_len, uint16_t n_flat, uint16_t n_btc1, uint16_t n_btc2
-         * Followed by raw deflate payload of size (block_len - 9).
-         * Decompressed layout:
-         *   modes[(total_4x4 + 3)/4] (2 bits per 4x4 tile: 0=skip, 1=flat, 2=1bit-btc, 3=2bit-dxt1)
-         *   endpoints[(n_flat + (n_btc1 + n_btc2)*2) * 2] (uint16_t RGB565)
-         *   masks16[n_btc1 * 2] (uint16_t 16-bit mask)
-         *   masks32[n_btc2 * 4] (uint32_t 32-bit 2bpp mask)
-         */
-        if (block_len < 9 || width % 4 || block_height % 4) {
-            return ESP_FAIL;
-        }
-        uint16_t raw_len = read_le16(block_data + 1);
-        uint16_t n_flat = read_le16(block_data + 3);
-        uint16_t n_btc1 = read_le16(block_data + 5);
-        uint16_t n_btc2 = read_le16(block_data + 7);
-        int tiles_x = width / 4;
-        int tiles_y = block_height / 4;
-        int total_tiles = tiles_x * tiles_y;
-        int modes_len = (total_tiles + 3) / 4;
-
-        size_t expected = modes_len + (size_t)n_flat * 2 + (size_t)n_btc1 * 6 + (size_t)n_btc2 * 8;
-        if (expected != raw_len || (size_t)n_flat + n_btc1 + n_btc2 > (size_t)total_tiles) {
-            return ESP_ERR_INVALID_SIZE;
-        }
-        uint8_t *raw_buf = (uint8_t *)heap_caps_malloc(raw_len + 4, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-        if (!raw_buf) {
-            raw_buf = (uint8_t *)esp_eaf_malloc_prefer_psram(raw_len + 4);
-        }
-        if (!raw_buf) {
-            return ESP_ERR_NO_MEM;
-        }
-        size_t decomp_sz = tinfl_decompress_mem_to_mem(
-            raw_buf, raw_len, block_data + 9, block_len - 9, 0
-        );
-        if (decomp_sz != raw_len) {
-            free(raw_buf);
-            return ESP_FAIL;
-        }
-
-        const uint8_t *modes = raw_buf;
-        unsigned counts[4] = {0};
-        for (int t = 0; t < total_tiles; t++) counts[(modes[t >> 2] >> ((t & 3) * 2)) & 3]++;
-        if (counts[1] != n_flat || counts[2] != n_btc1 || counts[3] != n_btc2) {
-            free(raw_buf);
-            return ESP_ERR_INVALID_SIZE;
-        }
-        const uint8_t *ep_ptr = raw_buf + modes_len;
-        const uint8_t *mask16_ptr = ep_ptr + (n_flat + (size_t)(n_btc1 + n_btc2) * 2) * 2;
-        const uint8_t *mask32_ptr = mask16_ptr + (size_t)n_btc1 * 2;
-        uint16_t *fb16 = (uint16_t *)decode_buffer;
-        uint16_t min_x = width, min_y = header->height, max_x = 0, max_y = 0;
-
-        for (int t = 0; t < total_tiles; t++) {
-            uint8_t mode = (modes[t >> 2] >> ((t & 3) * 2)) & 0x03;
-            if (mode == 0) {
-                continue;
-            }
-            uint16_t ty = (t / tiles_x) * 4;
-            uint16_t tx = (t % tiles_x) * 4;
-            if (tx < min_x) min_x = tx;
-            if (ty < min_y) min_y = ty;
-            if (tx + 3 > max_x) max_x = tx + 3;
-            if (ty + 3 > max_y) max_y = ty + 3;
-
-            if (mode == 1) {
-                uint16_t c = read_le16(ep_ptr);
-                ep_ptr += 2;
-                if (swap_color) c = __builtin_bswap16(c);
-                uint32_t c2 = ((uint32_t)c << 16) | c;
-                for (int r = 0; r < 4; r++) {
-                    uint32_t *row32 = (uint32_t *)(fb16 + (ty + r) * width + tx);
-                    row32[0] = c2;
-                    row32[1] = c2;
-                }
-            } else if (mode == 2) {
-                uint16_t c0 = read_le16(ep_ptr);
-                uint16_t c1 = read_le16(ep_ptr + 2);
-                ep_ptr += 4;
-                if (swap_color) {
-                    c0 = __builtin_bswap16(c0);
-                    c1 = __builtin_bswap16(c1);
-                }
-                uint16_t m16 = read_le16(mask16_ptr);
-                mask16_ptr += 2;
-                for (int r = 0; r < 4; r++) {
-                    uint16_t *dst = fb16 + (ty + r) * width + tx;
-                    dst[0] = (m16 & 1) ? c1 : c0;
-                    dst[1] = (m16 & 2) ? c1 : c0;
-                    dst[2] = (m16 & 4) ? c1 : c0;
-                    dst[3] = (m16 & 8) ? c1 : c0;
-                    m16 >>= 4;
-                }
-            } else if (mode == 3) {
-                uint16_t c0 = read_le16(ep_ptr);
-                uint16_t c3 = read_le16(ep_ptr + 2);
-                ep_ptr += 4;
-                int r0 = (c0 >> 11) & 0x1F, g0 = (c0 >> 5) & 0x3F, b0 = c0 & 0x1F;
-                int r3 = (c3 >> 11) & 0x1F, g3 = (c3 >> 5) & 0x3F, b3 = c3 & 0x1F;
-                uint16_t c1 = (uint16_t)((((2 * r0 + r3) / 3) << 11) | (((2 * g0 + g3) / 3) << 5) | ((2 * b0 + b3) / 3));
-                uint16_t c2 = (uint16_t)((((r0 + 2 * r3) / 3) << 11) | (((g0 + 2 * g3) / 3) << 5) | ((b0 + 2 * b3) / 3));
-                if (swap_color) {
-                    c0 = __builtin_bswap16(c0);
-                    c1 = __builtin_bswap16(c1);
-                    c2 = __builtin_bswap16(c2);
-                    c3 = __builtin_bswap16(c3);
-                }
-                uint16_t pal[4] = {c0, c1, c2, c3};
-                uint32_t m32;
-                memcpy(&m32, mask32_ptr, 4);
-                mask32_ptr += 4;
-                for (int r = 0; r < 4; r++) {
-                    uint16_t *dst = fb16 + (ty + r) * width + tx;
-                    dst[0] = pal[m32 & 3];
-                    dst[1] = pal[(m32 >> 2) & 3];
-                    dst[2] = pal[(m32 >> 4) & 3];
-                    dst[3] = pal[(m32 >> 6) & 3];
-                    m32 >>= 8;
-                }
-            }
-        }
-        if (max_x >= min_x) {
-            min_y += block_index * header->block_height;
-            max_y += block_index * header->block_height;
-            if (min_x < decoder->dirty.x1) decoder->dirty.x1 = min_x;
-            if (min_y < decoder->dirty.y1) decoder->dirty.y1 = min_y;
-            if (max_x > decoder->dirty.x2) decoder->dirty.x2 = max_x;
-            if (max_y > decoder->dirty.y2) decoder->dirty.y2 = max_y;
-            decoder->dirty.valid = true;
-        }
-        free(raw_buf);
-        return ESP_OK;
-    }
-
-    if (encoding_type == ESP_EAF_ENCODING_BTC_ALPHA) {
-        /* 4x4 Delta-BTC + 8-bit BC4/DXT5 continuous Alpha (0x0B):
-         * Header after encoding_type(1B):
-         *   uint32_t raw_len, uint16_t n_flat, uint16_t n_interp
-         * Followed by raw deflate payload of size (block_len - 9).
-         * Decompressed layout:
-         *   modes[(total_4x4 + 3)/4] (2 bits per 4x4 tile: 0=skip, 1=flat RGBA, 3=2bpp DXT5 RGBA)
-         *   flat_c[n_flat] (uint16_t RGB565)
-         *   flat_a[n_flat] (uint8_t A8)
-         *   interp_c[n_interp * 2] (uint16_t c0, c3)
-         *   interp_a[n_interp * 2] (uint8_t a0, a3)
-         *   masks_c[n_interp] (uint32_t 2bpp RGB mask)
-         *   masks_a[n_interp] (uint32_t 2bpp Alpha mask)
-         */
-        if (block_len < 9 || width % 4 || block_height % 4) {
-            return ESP_ERR_INVALID_SIZE;
-        }
-        uint32_t raw_len = read_le32(block_data + 1);
-        uint16_t n_flat = read_le16(block_data + 5);
-        uint16_t n_interp = read_le16(block_data + 7);
-        int tiles_x = width / 4;
-        int tiles_y = block_height / 4;
-        int total_tiles = tiles_x * tiles_y;
-        size_t modes_len = (size_t)(total_tiles + 3) / 4;
-        size_t expected = modes_len + (size_t)n_flat * 3 + (size_t)n_interp * 14;
-        if (expected != raw_len || (size_t)n_flat + n_interp > (size_t)total_tiles) {
-            return ESP_ERR_INVALID_SIZE;
-        }
-        uint8_t *raw_buf = (uint8_t *)heap_caps_malloc(raw_len + 4, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-        if (!raw_buf) {
-            raw_buf = (uint8_t *)esp_eaf_malloc_prefer_psram(raw_len + 4);
-        }
-        if (!raw_buf) {
-            return ESP_ERR_NO_MEM;
-        }
-        size_t decomp_sz = tinfl_decompress_mem_to_mem(raw_buf, raw_len, block_data + 9, block_len - 9, 0);
-        if (decomp_sz != raw_len) {
-            free(raw_buf);
-            return ESP_FAIL;
-        }
-        const uint8_t *modes = raw_buf;
-        unsigned counts[4] = {0};
-        for (int t = 0; t < total_tiles; t++) {
-            uint8_t m = (modes[t >> 2] >> ((t & 3) * 2)) & 0x03;
-            if (m == 2) {
-                free(raw_buf);
-                return ESP_ERR_INVALID_SIZE;
-            }
-            counts[m]++;
-        }
-        if (counts[1] != n_flat || counts[3] != n_interp) {
-            free(raw_buf);
-            return ESP_ERR_INVALID_SIZE;
-        }
-        const uint8_t *flat_c_ptr = modes + modes_len;
-        const uint8_t *flat_a_ptr = flat_c_ptr + (size_t)n_flat * 2;
-        const uint8_t *interp_c_ptr = flat_a_ptr + n_flat;
-        const uint8_t *interp_a_ptr = interp_c_ptr + (size_t)n_interp * 4;
-        const uint8_t *mask_c_ptr = interp_a_ptr + (size_t)n_interp * 2;
-        const uint8_t *mask_a_ptr = mask_c_ptr + (size_t)n_interp * 4;
-
-        uint16_t *fb16 = (uint16_t *)decode_buffer;
-        uint8_t *alpha_dst = alpha_buffer ? (alpha_buffer + (size_t)block_index * header->block_height * width) : NULL;
-        uint16_t min_x = width, min_y = header->height, max_x = 0, max_y = 0;
-
-        for (int t = 0; t < total_tiles; t++) {
-            uint8_t mode = (modes[t >> 2] >> ((t & 3) * 2)) & 0x03;
-            if (mode == 0) {
-                continue;
-            }
-            uint16_t ty = (t / tiles_x) * 4;
-            uint16_t tx = (t % tiles_x) * 4;
-            if (tx < min_x) min_x = tx;
-            if (ty < min_y) min_y = ty;
-            if (tx + 3 > max_x) max_x = tx + 3;
-            if (ty + 3 > max_y) max_y = ty + 3;
-
-            if (mode == 1) {
-                uint16_t c = read_le16(flat_c_ptr);
-                flat_c_ptr += 2;
-                uint8_t a = *flat_a_ptr++;
-                if (swap_color) c = __builtin_bswap16(c);
-                uint32_t c2 = ((uint32_t)c << 16) | c;
-                uint32_t a4 = (uint32_t)a * 0x01010101u;
-                for (int r = 0; r < 4; r++) {
-                    size_t row_off = (size_t)(ty + r) * width + tx;
-                    uint32_t *row32 = (uint32_t *)(fb16 + row_off);
-                    row32[0] = c2;
-                    row32[1] = c2;
-                    if (alpha_dst) {
-                        *(uint32_t *)(alpha_dst + row_off) = a4;
-                    }
-                }
-            } else if (mode == 3) {
-                uint16_t c0 = read_le16(interp_c_ptr);
-                uint16_t c3 = read_le16(interp_c_ptr + 2);
-                interp_c_ptr += 4;
-                int r0 = (c0 >> 11) & 0x1F, g0 = (c0 >> 5) & 0x3F, b0 = c0 & 0x1F;
-                int r3 = (c3 >> 11) & 0x1F, g3 = (c3 >> 5) & 0x3F, b3 = c3 & 0x1F;
-                uint16_t c1 = (uint16_t)((((2 * r0 + r3) / 3) << 11) | (((2 * g0 + g3) / 3) << 5) | ((2 * b0 + b3) / 3));
-                uint16_t c2 = (uint16_t)((((r0 + 2 * r3) / 3) << 11) | (((g0 + 2 * g3) / 3) << 5) | ((b0 + 2 * b3) / 3));
-                if (swap_color) {
-                    c0 = __builtin_bswap16(c0);
-                    c1 = __builtin_bswap16(c1);
-                    c2 = __builtin_bswap16(c2);
-                    c3 = __builtin_bswap16(c3);
-                }
-                uint16_t pal_c[4] = {c0, c1, c2, c3};
-
-                uint8_t a0 = interp_a_ptr[0];
-                uint8_t a3 = interp_a_ptr[1];
-                interp_a_ptr += 2;
-                uint8_t pal_a[4] = {
-                    a0,
-                    (uint8_t)((2 * a0 + a3) / 3),
-                    (uint8_t)((a0 + 2 * a3) / 3),
-                    a3,
-                };
-
-                uint32_t mc = read_le32(mask_c_ptr);
-                mask_c_ptr += 4;
-                uint32_t ma = read_le32(mask_a_ptr);
-                mask_a_ptr += 4;
-
-                for (int r = 0; r < 4; r++) {
-                    size_t row_off = (size_t)(ty + r) * width + tx;
-                    uint16_t *dst_c = fb16 + row_off;
-                    dst_c[0] = pal_c[mc & 3];
-                    dst_c[1] = pal_c[(mc >> 2) & 3];
-                    dst_c[2] = pal_c[(mc >> 4) & 3];
-                    dst_c[3] = pal_c[(mc >> 6) & 3];
-                    mc >>= 8;
-                    if (alpha_dst) {
-                        uint8_t *dst_a = alpha_dst + row_off;
-                        dst_a[0] = pal_a[ma & 3];
-                        dst_a[1] = pal_a[(ma >> 2) & 3];
-                        dst_a[2] = pal_a[(ma >> 4) & 3];
-                        dst_a[3] = pal_a[(ma >> 6) & 3];
-                        ma >>= 8;
-                    }
-                }
-            }
-        }
-        if (max_x >= min_x) {
-            min_y += block_index * header->block_height;
-            max_y += block_index * header->block_height;
-            if (min_x < decoder->dirty.x1) decoder->dirty.x1 = min_x;
-            if (min_y < decoder->dirty.y1) decoder->dirty.y1 = min_y;
-            if (max_x > decoder->dirty.x2) decoder->dirty.x2 = max_x;
-            if (max_y > decoder->dirty.y2) decoder->dirty.y2 = max_y;
-            decoder->dirty.valid = true;
-        }
-        free(raw_buf);
-        return ESP_OK;
-    }
-
-    if (encoding_type == ESP_EAF_ENCODING_LOSSLESS_RGBA) {
+    if (encoding_type == ESP_EAF_ENCODING_LOSSLESS) {
         /* 100% Bit-Exact Lossless 4x4 Temporal-XOR RGB565 + A8 (0x0C):
          * Header after encoding_type(1B):
          *   uint8_t flags (bit 0: temporal XOR/delta from previous frame; 0 = keyframe overwrite)
@@ -2058,7 +1634,11 @@ esp_err_t esp_eaf_block_decode_ctx(esp_eaf_decoder_t *decoder, const esp_eaf_hea
                     free(ram_au);
                     return ESP_ERR_INVALID_SIZE;
                 }
-                esp_eaf_i420_to_rgb565(out_frame.outbuf, width, block_height, (uint16_t *)decode_buffer, swap_color);
+                if (decoder->out_fmt == ESP_EAF_OUT_BGRA8888) {
+                    esp_eaf_i420_to_bgra8888(out_frame.outbuf, width, block_height, (uint32_t *)decode_buffer);
+                } else {
+                    esp_eaf_i420_to_rgb565(out_frame.outbuf, width, block_height, (uint16_t *)decode_buffer, swap_color);
+                }
                 got_pic = true;
             }
         }
@@ -2160,6 +1740,8 @@ esp_err_t esp_eaf_block_decode_ctx(esp_eaf_decoder_t *decoder, const esp_eaf_hea
     }
 
     uint16_t *dest = (uint16_t *)decode_buffer;
+    uint32_t *dest32 = (uint32_t *)decode_buffer;
+    bool out_8888 = (decoder->out_fmt == ESP_EAF_OUT_BGRA8888);
     size_t dest_index = 0;
 
     switch (header->bit_depth) {
@@ -2171,7 +1753,11 @@ esp_err_t esp_eaf_block_decode_ctx(esp_eaf_decoder_t *decoder, const esp_eaf_hea
         }
         for (size_t i = 0; i < pixel_count; i++) {
             const uint8_t *bgr = &work_buffer[i * 3];
-            dest[dest_index++] = esp_eaf_rgb565_from_bgr(bgr, swap_color);
+            if (out_8888) {
+                dest32[dest_index++] = (uint32_t)bgr[0] | ((uint32_t)bgr[1] << 8) | ((uint32_t)bgr[2] << 16) | 0xFF000000U;
+            } else {
+                dest[dest_index++] = esp_eaf_rgb565_from_bgr(bgr, swap_color);
+            }
             if (alpha_block != NULL) {
                 alpha_block[i] = 0xFF;
             }
@@ -2188,6 +1774,13 @@ esp_err_t esp_eaf_block_decode_ctx(esp_eaf_decoder_t *decoder, const esp_eaf_hea
             ESP_LOGE(TAG, "Insufficient data for 8-bit block %d", block_index);
             free(work_buffer);
             return ESP_FAIL;
+        }
+        if (out_8888) {
+            const uint32_t *pal32 = (const uint32_t *)header->palette;
+            for (size_t i = 0; i < pixel_count; i++) {
+                dest32[i] = pal32[work_buffer[i]];
+            }
+            break;
         }
         for (size_t i = 0; i < pixel_count; i++) {
             uint8_t ci = work_buffer[i];
@@ -2375,46 +1968,21 @@ static esp_err_t esp_eaf_jpeg_decode_hardware(const uint8_t *jpeg_data, size_t j
         return ESP_ERR_INVALID_STATE;
     }
 
-    /* First parse header to get dimensions using software decoder */
-    uint32_t w, h;
-    jpeg_dec_config_t sw_config = {
-        .output_type = JPEG_PIXEL_FORMAT_RGB565_LE,
-        .rotate = JPEG_ROTATE_0D,
-    };
-
-    jpeg_dec_handle_t sw_dec;
-    if (jpeg_dec_open(&sw_config, &sw_dec) != ESP_OK) {
+    /* Query JPEG picture info and enforce S31 / P4 2D-DMA horizontal macroblock alignment (hb) */
+    uint32_t w = 0, h = 0, hb = 0;
+    jpeg_decode_picture_info_t pic_info = {0};
+    if (jpeg_decoder_get_info(jpeg_data, jpeg_size, &pic_info) != ESP_OK) {
         return ESP_FAIL;
     }
-
-    jpeg_dec_io_t *jpeg_io = esp_eaf_malloc_prefer_psram(sizeof(jpeg_dec_io_t));
-    jpeg_dec_header_info_t *header_info = esp_eaf_malloc_prefer_psram(sizeof(jpeg_dec_header_info_t));
-    if (!jpeg_io || !header_info) {
-        free(jpeg_io);
-        free(header_info);
-        jpeg_dec_close(sw_dec);
-        return ESP_ERR_NO_MEM;
+    w = pic_info.width;
+    h = pic_info.height;
+    if (pic_info.sample_method == JPEG_DOWN_SAMPLING_YUV444) {
+        hb = 48; /* RGB565 YUV444 horizontal DMA block is 48 pixels */
+    } else if (pic_info.sample_method == JPEG_DOWN_SAMPLING_YUV422 ||
+               pic_info.sample_method == JPEG_DOWN_SAMPLING_YUV420) {
+        hb = 32; /* RGB565 YUV422/420 horizontal DMA block is 32 pixels */
     }
-
-    jpeg_io->inbuf = (unsigned char *)jpeg_data;
-    jpeg_io->inbuf_len = jpeg_size;
-
-    if (jpeg_dec_parse_header(sw_dec, jpeg_io, header_info) != JPEG_ERR_OK) {
-        free(jpeg_io);
-        free(header_info);
-        jpeg_dec_close(sw_dec);
-        return ESP_FAIL;
-    }
-
-    w = header_info->width;
-    h = header_info->height;
-
-    free(jpeg_io);
-    free(header_info);
-    jpeg_dec_close(sw_dec);
-
-    /* Check if dimensions support hardware decoding (16-pixel alignment required) */
-    if ((w % 16 != 0) || (h % 16 != 0)) {
+    if (hb == 0 || (w % hb != 0) || (h % 16 != 0)) {
         return ESP_ERR_NOT_SUPPORTED;  /* Fall back to software */
     }
 
