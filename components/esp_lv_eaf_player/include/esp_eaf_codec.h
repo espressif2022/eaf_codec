@@ -21,8 +21,8 @@ extern "C" {
  *   - 0x00..0x03 : Legacy compatibility (Palette RLE / Huffman / Full-Frame JPEG keyframe)
  *   - 0x04 LOSSLESS  : [Core 1] 100% Bit-Exact Lossless (565+A8 & BGRA8888, adaptive sub-modes)
  *   - 0x05 BTC_SAFE  : [Core 2] 4x4 Error-Bounded BTC + Raw Escape (maxErr <= 8, 565 & BGRA8888)
- *   - 0x06 QUAD_JPEG : [Core 3] 16x16+8x8 Quadtree Delta Strip JPEG (HW/SW JPEG, 565 & RGB888, no alpha)
- *   - 0x07 H264      : [Core 4] Constrained Baseline I/P Video Stream (565 & RGB888, no alpha)
+ *   - 0x06 QUAD_JPEG : [Core 3] 16x16+8x8 Quadtree Delta Strip JPEG (HW/SW JPEG, native 565, no alpha)
+ *   - 0x07 H264      : [Core 4] Constrained Baseline I/P Video Stream (direct 565 or BGRA8888, no alpha)
  */
 typedef enum {
     /* Legacy compatibility & internal keyframe IDs (0x00 .. 0x03) */
@@ -47,8 +47,8 @@ typedef enum {
 
 typedef enum {
     ESP_EAF_OUT_RGB565   = 0, /*!< 16-bit RGB565 (+ optional A8 plane) */
-    ESP_EAF_OUT_RGB888   = 1, /*!< 24-bit RGB888 / BGR888 (opaque modes 0x02, 0x06, 0x07) */
-    ESP_EAF_OUT_BGRA8888 = 2, /*!< 32-bit BGRA8888 (all modes 0x00..0x07) */
+    ESP_EAF_OUT_RGB888   = 1, /*!< Reserved for a direct 24-bit decoder backend. */
+    ESP_EAF_OUT_BGRA8888 = 2, /*!< Direct BGRA8888 output where the payload/backend supports it. */
 } esp_eaf_output_format_t;
 
 static inline esp_eaf_container_t esp_eaf_container_probe(const void *data, size_t size)

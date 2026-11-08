@@ -3,64 +3,81 @@ if(IDF_TARGET STREQUAL "esp32p4" OR IDF_TARGET STREQUAL "esp32s31")
     list(APPEND PRIV_REQUIRES_LIST esp_driver_jpeg)
 endif()
 
+set(EAF_SRCS
+    "src/core/esp_eaf_player.c"
+    "src/core/esp_eaf_decoder.c"
+    "src/container/eaf/esp_eaf_container.c"
+    "src/container/eaf4/esp_eaf4_container.c"
+    "src/codec/esp_eaf_codec_registry.c"
+    "src/codec/esp_eaf_codec_bounded.c"
+    "src/codec/common/esp_eaf_codec_support.c"
+    "src/codec/eaf/compat.c"
+    "src/codec/eaf/lossless.c"
+    "src/codec/eaf/jpeg_delta.c"
+    "src/codec/eaf/video.c"
+    "src/codec/eaf4/lossless.c"
+)
+
+# LVGL is an optional adapter, not a core dependency. Applications using
+# lv_eaf.h add lvgl/lvgl themselves; other GUIs only build esp_eaf_player.h.
+idf_build_get_property(build_components BUILD_COMPONENTS)
+set(lvgl_name "")
+if(lvgl IN_LIST build_components)
+    set(lvgl_name lvgl)
+elseif(lvgl__lvgl IN_LIST build_components)
+    set(lvgl_name lvgl__lvgl)
+endif()
+if(NOT "${lvgl_name}" STREQUAL "")
+    list(APPEND EAF_SRCS "src/adapter/lvgl/lv_eaf.c")
+endif()
+
 idf_component_register(
-    SRC_DIRS "src"
+    SRCS ${EAF_SRCS}
     INCLUDE_DIRS "include"
-    PRIV_INCLUDE_DIRS "src"
+    PRIV_INCLUDE_DIRS
+        "src/codec"
+        "src/core"
+        "src/adapter/lvgl"
     PRIV_REQUIRES ${PRIV_REQUIRES_LIST}
 )
 
-idf_build_get_property(build_components BUILD_COMPONENTS)
-if(lvgl IN_LIST build_components)
-    set(lvgl_name lvgl)
-    set(lvgl_ver $ENV{LVGL_VERSION})
-else()
-    set(lvgl_name lvgl__lvgl)
+set(extra_libs "")
+if(NOT "${lvgl_name}" STREQUAL "")
     idf_component_get_property(lvgl_ver ${lvgl_name} COMPONENT_VERSION)
+    message(STATUS "esp_lv_eaf_player: optional LVGL adapter enabled (${lvgl_ver})")
+    list(APPEND extra_libs idf::${lvgl_name})
+    idf_component_get_property(lvgl_dir ${lvgl_name} COMPONENT_DIR)
+    if(EXISTS "${lvgl_dir}")
+        target_include_directories(${COMPONENT_LIB} PRIVATE "${lvgl_dir}")
+    endif()
+else()
+    message(STATUS "esp_lv_eaf_player: core-only build (no LVGL component found)")
 endif()
 
-if("${lvgl_ver}" STREQUAL "")
-    message(WARNING "esp_lv_eaf_player: LVGL version not detected, assuming v9.x")
-endif()
-
-message(STATUS "esp_lv_eaf_player: LVGL version: ${lvgl_ver}")
-
-set(extra_libs idf::${lvgl_name})
-
-# Conditionally link software JPEG decoder based on Kconfig
 if(CONFIG_ESP_LV_EAF_ENABLE_SW_JPEG)
     if("esp_new_jpeg" IN_LIST build_components)
         list(APPEND extra_libs idf::esp_new_jpeg)
-        message(STATUS "esp_lv_eaf_player: Software JPEG decoder enabled (esp_new_jpeg)")
     endif()
     if("espressif__esp_new_jpeg" IN_LIST build_components)
         list(APPEND extra_libs idf::espressif__esp_new_jpeg)
-        message(STATUS "esp_lv_eaf_player: Software JPEG decoder enabled (espressif__esp_new_jpeg)")
     endif()
 else()
-    message(STATUS "esp_lv_eaf_player: Software JPEG decoder DISABLED (saves ~19KB DRAM)")
+    message(STATUS "esp_lv_eaf_player: software JPEG decoder disabled")
 endif()
 
 if("espressif__esp_h264" IN_LIST build_components)
     list(APPEND extra_libs idf::espressif__esp_h264)
     target_compile_definitions(${COMPONENT_LIB} PRIVATE ESP_LV_EAF_ENABLE_H264=1)
-    message(STATUS "esp_lv_eaf_player: H.264 decoder enabled (espressif__esp_h264)")
+    message(STATUS "esp_lv_eaf_player: H.264 decoder enabled")
 endif()
 
-# Add hardware JPEG decoder support for chips that have it
-idf_build_get_property(target IDF_TARGET)
-if(target STREQUAL "esp32p4" OR target STREQUAL "esp32s31")
+if(IDF_TARGET STREQUAL "esp32p4" OR IDF_TARGET STREQUAL "esp32s31")
     list(APPEND extra_libs idf::esp_driver_jpeg)
-    message(STATUS "esp_lv_eaf_player: Hardware JPEG decoder enabled for ${target}")
 endif()
 
-idf_component_get_property(lvgl_dir ${lvgl_name} COMPONENT_DIR)
-message(STATUS "esp_lv_eaf_player: lvgl component dir: ${lvgl_dir}")
-if(EXISTS "${lvgl_dir}")
-    target_include_directories(${COMPONENT_LIB} PRIVATE "${lvgl_dir}")
+if(extra_libs)
+    target_link_libraries(${COMPONENT_LIB} PUBLIC ${extra_libs})
 endif()
-
-target_link_libraries(${COMPONENT_LIB} PUBLIC ${extra_libs})
 
 include(package_manager)
 cu_pkg_define_version(${CMAKE_CURRENT_LIST_DIR})

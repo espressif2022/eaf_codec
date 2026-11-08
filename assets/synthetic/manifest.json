@@ -1,0 +1,79 @@
+{
+  "generator_version": 1,
+  "frames_per_scene": 24,
+  "scenes": [
+    {
+      "name": "flat_ui",
+      "width": 160,
+      "height": 160,
+      "frames": 24,
+      "description": "Opaque flat colors, hard edges and local motion",
+      "pixel_sha256": "a484b5e55d82614b0881b538ffaf30141745ae576e2b39a47d97c9cad535e9c9"
+    },
+    {
+      "name": "alpha_glow",
+      "width": 160,
+      "height": 160,
+      "frames": 24,
+      "description": "Continuous straight alpha with non-zero hidden RGB",
+      "pixel_sha256": "cd12a3f45b20395f78c37a3cbfbe49bea122917c9cbcbda355df13a1e4262379"
+    },
+    {
+      "name": "dark_gradient",
+      "width": 160,
+      "height": 160,
+      "frames": 24,
+      "description": "Subtle near-black gradients and low-amplitude motion",
+      "pixel_sha256": "0e9971990d6c418ed04ede94a6c5c7956a1dcbafe216ffe899a1c08a2c83d8d8"
+    },
+    {
+      "name": "fine_lines",
+      "width": 160,
+      "height": 160,
+      "frames": 24,
+      "description": "One-pixel lines and high-contrast colored edges",
+      "pixel_sha256": "a7e3834e7299182507d6c152673f3797bf43b3f6cc2471eff63dbef4bdaad6ca"
+    },
+    {
+      "name": "natural_motion",
+      "width": 160,
+      "height": 160,
+      "frames": 24,
+      "description": "Smooth multi-frequency natural-looking motion",
+      "pixel_sha256": "8341ab5aa346ebd98c803e67231f302a8ffa433c456df1a3b9f1d0caab301208"
+    },
+    {
+      "name": "high_frequency",
+      "width": 160,
+      "height": 160,
+      "frames": 24,
+      "description": "Frame-varying deterministic grain and sparse sparks",
+      "pixel_sha256": "c049c28cf25e3ab0930ad4b3a8623bb75c1ea12fd901c22e0e23362e0712cdf6"
+    },
+    {
+      "name": "pan_scroll",
+      "width": 320,
+      "height": 160,
+      "frames": 24,
+      "description": "Full-frame horizontal translation of textured content",
+      "pixel_sha256": "a784e1d20b4bb69817767070091d80293412c99964201b2d41629608173c2c69"
+    },
+    {
+      "name": "micro_motion",
+      "width": 160,
+      "height": 160,
+      "frames": 24,
+      "description": "Static detailed background with a tiny moving region",
+      "pixel_sha256": "8eab1240b9137a9cdc6d0b0ea578ddfe6fe8b0e1ac962534c19c7040933a5b36"
+    },
+    {
+      "name": "color_key",
+      "width": 160,
+      "height": 160,
+      "frames": 24,
+      "description": "Exact RGB565 black key background with a hard-edge object",
+      "pixel_sha256": "3538c809bd056497ea8bfc88a181eacf7e71a6ca76cf90474e207e6ca74983af"
+    }
+  ],
+  "dataset_pixel_sha256": "024b5c3c8d0e06bf5f6b5186b6ac6f5f6b86f552cb101507cc74e609f7a46eb6"
+}

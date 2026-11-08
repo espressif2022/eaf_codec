@@ -8,7 +8,7 @@ menu "ESP LV EAF Player"
             Disabling this option saves ~19KB DRAM but JPEG blocks will fail to
             decode with a runtime warning.
 
-            If your EAF files only use RLE/Huffman encoding (no JPEG blocks),
-            you can disable this to reduce memory usage.
+            You can disable this when all assets use Palette RLE/Huffman,
+            Lossless, Bounded, or H.264 and contain no JPEG/JPEG Delta blocks.
 
 endmenu

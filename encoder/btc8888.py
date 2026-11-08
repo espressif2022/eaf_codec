@@ -1,4 +1,4 @@
-"""BTC-8888 Safe (Mode 6): 0x09 BTC-Safe extended to 4-channel 8-bit BGRA8888.
+"""BTC-8888 Safe (EAF4 submode 6, unified codec 0x05) for 8-bit BGRA8888.
 
 Uncompressed frame payload layout (before zlib):
   - modes[num_tiles] : 1 byte per 4x4 tile in raster order

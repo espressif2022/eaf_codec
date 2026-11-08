@@ -2,5 +2,15 @@ __pycache__/
 *.pyc
 .venv/
 build/
+bench/s31_firmware/managed_components/
+bench/s31_firmware/components/
+bench/s31_firmware/dependencies.lock
+bench/s31_firmware/sdkconfig
+bench/s31_firmware/sdkconfig.s3_*
+bench/s31_firmware/build*/
+components/esp_lv_eaf_player/test_apps/*/build*/
+components/esp_lv_eaf_player/test_apps/*/managed_components/
+components/esp_lv_eaf_player/test_apps/*/dependencies.lock
+components/esp_lv_eaf_player/test_apps/*/sdkconfig
 *.o
 .pytest_cache/

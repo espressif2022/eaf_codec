@@ -1,0 +1,36 @@
+{
+  "generator_version": 1,
+  "frames_per_scene": 24,
+  "pillow_version": "12.3.0",
+  "masters": {
+    "robot_mascot.png": "5c32669727c0e0661bd47f35168334ca160a2356083281a1ce2bc8f697edf2e2",
+    "mountain_lake.png": "9b2b7f54fa12f0f6a0ec78ce1f9ebe1eecc5a64e8f1b7d42a828f361fba0646c"
+  },
+  "scenes": [
+    {
+      "name": "robot_float",
+      "width": 160,
+      "height": 160,
+      "frames": 24,
+      "description": "Transparent generated mascot with translation, rotation and scale motion",
+      "pixel_sha256": "a9dabd4894470ea4fe53e05a0625d68ce395392c9eb8f5cec8482e33f65589b3"
+    },
+    {
+      "name": "landscape_pan",
+      "width": 320,
+      "height": 180,
+      "frames": 24,
+      "description": "Photorealistic mountain-lake scene with slow pan, zoom and exposure change",
+      "pixel_sha256": "e8c3315fb1fe09c8e655957e2e195ddceab9ef7db9f56b248ef4675cd0bbff38"
+    },
+    {
+      "name": "landscape_water",
+      "width": 320,
+      "height": 180,
+      "frames": 24,
+      "description": "Photorealistic landscape with localized water ripple motion",
+      "pixel_sha256": "067ec2934a2b12b5aa1aaaefee7d2f11791c3c82ecfab3d3452cb883069f0c69"
+    }
+  ],
+  "dataset_pixel_sha256": "421801c7c4389abd052f4bc34923a45d26f0c29d92395c33cd04f220cc29d2f1"
+}

@@ -1,4 +1,4 @@
-"""Mode 7 (QUAD_JPEG): Two-level Quadtree (16x16 + 8x8 quadrant mask) Abbreviated-JPEG for 888/565.
+"""Codec 0x06 (QUAD_JPEG): two-level 16x16/8x8 quadtree Abbreviated-JPEG for 888/565.
 
 Extracts only changed 8x8 quadrants between consecutive frames, packs them into a 1D
 horizontal strip of 16x16 MCUs (height = 16, width = 16 * M), and strips the redundant
@@ -102,7 +102,7 @@ def encode_quad_jpeg_frame(
     max_th: int = 8,
     hw_dma_align: bool = True,
 ) -> tuple[bytes, int, np.ndarray]:
-    """Encode one BGRA8888 frame as Mode 7 (QUAD_JPEG).
+    """Encode one BGRA8888 frame as codec 0x06 (QUAD_JPEG).
 
     Payload format (stored directly, not double-deflated):
       - byte 0: submode
@@ -242,7 +242,7 @@ def encode_quad_jpeg_frame(
 
 
 def restore_quad_jpeg_frame(blob: bytes, previous_bgra: np.ndarray, hdr_state: dict) -> np.ndarray:
-    """Reference decoder for Mode 7 (QUAD_JPEG)."""
+    """Reference decoder for codec 0x06 (QUAD_JPEG)."""
     h, w, _ = previous_bgra.shape
     submode = blob[0]
     if submode == SUB_KEYFRAME_FULL:

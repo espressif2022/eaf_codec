@@ -1,0 +1,375 @@
+/*
+ * SPDX-FileCopyrightText: 2025-2026 Espressif Systems (Shanghai) CO LTD
+ * SPDX-License-Identifier: Apache-2.0
+ */
+/**
+ * @file esp_eaf4_container.c
+ * @brief EAF4 container parser and frame reader; pixel reconstruction is delegated to codecs
+ */
+
+#define _POSIX_C_SOURCE 200809L
+#include "eaf4.h"
+#include <stdbool.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include "zlib.h"
+#include "esp_eaf_codec_internal.h"
+
+#ifdef ESP_PLATFORM
+#include "esp_heap_caps.h"
+#include "esp_cache.h"
+#include "esp_memory_utils.h"
+#include "esp_timer.h"
+#include "esp_log.h"
+#define NOW_US() esp_timer_get_time()
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+/* PSRAM is write-back with a 64-byte line. A short tail shares that line with
+ * the next heap block, so the write-back corrupts its header. */
+static size_t psram_bytes(size_t n)
+{
+    const size_t line = 64;
+    return (n + line - 1) & ~(line - 1);
+}
+static void *allocate(size_t n)
+{
+    size_t bytes = psram_bytes(n);
+    if (!n || bytes < n)
+        return NULL;
+    void *p = heap_caps_aligned_alloc(64, bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!p)
+        p = heap_caps_aligned_alloc(64, bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    return p;
+}
+static void release_buffer(void *p, size_t n)
+{
+    if (!p)
+        return;
+    if (n && esp_ptr_external_ram(p))
+        esp_cache_msync(p, psram_bytes(n), ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_INVALIDATE);
+    free(p);
+}
+#else
+static void *allocate(size_t n) { return malloc(n); }
+static inline int64_t host_now_us(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000000LL + ts.tv_nsec / 1000;
+}
+#define NOW_US() host_now_us()
+#endif
+
+struct eaf4 {
+    FILE *file;
+    const uint8_t *memory;
+    eaf4_info_t info;
+    uint8_t *index, *compressed, *scratch, *frame, *cached, *seek_snapshot;
+    uint32_t cached_offset;
+    uint32_t seek_snapshot_frame;
+    bool has_seek_snapshot;
+    size_t cached_bytes;
+    eaf4_timing_t timing;
+    uint32_t crc_table[8][256];
+    uint32_t next, max_compressed, max_decoded;
+};
+
+static uint16_t u16(const uint8_t *p) { return p[0] | ((uint16_t)p[1] << 8); }
+static uint32_t u32(const uint8_t *p)
+{
+    return p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+/* Slicing-by-eight IEEE CRC-32. Tables belong to the decoder and reside
+ * in internal RAM on ESP, avoiding flash-table fetches on every input byte. */
+static void crc_init(eaf4_t *p)
+{
+    for (unsigned i = 0; i < 256; ++i) {
+        uint32_t c = i;
+        for (unsigned bit = 0; bit < 8; ++bit)
+            c = (c >> 1) ^ ((c & 1) ? 0xedb88320U : 0);
+        p->crc_table[0][i] = c;
+    }
+    for (unsigned t = 1; t < 8; ++t)
+        for (unsigned i = 0; i < 256; ++i) {
+            uint32_t c = p->crc_table[t - 1][i];
+            p->crc_table[t][i] = (c >> 8) ^ p->crc_table[0][c & 255];
+        }
+}
+
+static uint32_t crc(eaf4_t *p, const void *data, size_t n)
+{
+    const uint8_t *b = data;
+    const uint32_t (*t)[256] = p->crc_table;
+    uint32_t c = 0xffffffffU;
+    while (n >= 8) {
+        uint32_t a = u32(b) ^ c, d = u32(b + 4);
+        c = t[7][a & 255] ^ t[6][(a >> 8) & 255] ^
+            t[5][(a >> 16) & 255] ^ t[4][a >> 24] ^
+            t[3][d & 255] ^ t[2][(d >> 8) & 255] ^
+            t[1][(d >> 16) & 255] ^ t[0][d >> 24];
+        b += 8;
+        n -= 8;
+    }
+    while (n--)
+        c = (c >> 8) ^ t[0][(c ^ *b++) & 255];
+    return ~c;
+}
+
+void eaf4_release_cache(eaf4_t *p)
+{
+    if (!p)
+        return;
+    if (p->file) {
+        fclose(p->file);
+        p->file = NULL;
+    }
+#ifdef ESP_PLATFORM
+    release_buffer(p->index, (size_t)p->info.frames * 24);
+    release_buffer(p->compressed, p->max_compressed);
+    release_buffer(p->cached, p->cached_bytes);
+    release_buffer(p->scratch, p->max_decoded);
+    release_buffer(p->seek_snapshot, p->info.frame_bytes);
+#else
+    free(p->index);
+    free(p->compressed);
+    free(p->cached);
+    free(p->scratch);
+    free(p->seek_snapshot);
+#endif
+    p->index = NULL;
+    p->compressed = NULL;
+    p->cached = NULL;
+    p->scratch = NULL;
+    p->seek_snapshot = NULL;
+    p->cached_bytes = 0;
+    p->has_seek_snapshot = false;
+}
+
+void eaf4_close(eaf4_t *p)
+{
+    if (!p)
+        return;
+    eaf4_release_cache(p);
+#ifdef ESP_PLATFORM
+    release_buffer(p->frame, p->info.frame_bytes);
+#else
+    free(p->frame);
+#endif
+    free(p);
+}
+
+const eaf4_info_t *eaf4_info(const eaf4_t *p) { return p ? &p->info : NULL; }
+const eaf4_timing_t *eaf4_timing(const eaf4_t *p) { return p ? &p->timing : NULL; }
+
+static int open_source(const char *path, const void *memory, size_t memory_size, eaf4_t **out)
+{
+    if ((!path && !memory) || !out)
+        return -1;
+    *out = NULL;
+#ifdef ESP_PLATFORM
+    eaf4_t *p = heap_caps_calloc(1, sizeof(*p), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+#else
+    eaf4_t *p = calloc(1, sizeof(*p));
+#endif
+    if (!p)
+        return -2;
+    crc_init(p);
+    uint8_t h[64];
+    long size;
+    p->memory = memory;
+    if (memory) {
+        if (memory_size < 64 || memory_size > 32 * 1024 * 1024) goto bad;
+        size = memory_size;
+        memcpy(h, memory, 64);
+    } else {
+        p->file = fopen(path, "rb");
+        if (!p->file || fseek(p->file, 0, SEEK_END)) goto bad;
+        size = ftell(p->file);
+        if (size < 64 || size > 32 * 1024 * 1024 || fseek(p->file, 0, SEEK_SET) || fread(h, 1, 64, p->file) != 64) goto bad;
+    }
+    if (memcmp(h, "EAF4", 4) || u16(h + 4) != 1 || u16(h + 6) != 64 || u16(h + 36) != 4 || u16(h + 38) != 4 ||
+        u32(h + 48) != 1)
+        goto bad;
+    uint32_t expected = u32(h + 40);
+    memset(h + 40, 0, 4);
+    if (crc(p, h, 64) != expected)
+        goto bad;
+    for (unsigned i = 52; i < 64; i++)
+        if (h[i])
+            goto bad;
+    p->info = (eaf4_info_t){u16(h + 8), u16(h + 10), u32(h + 12), u32(h + 16), u32(h + 20)};
+    eaf4_info_t *v = &p->info;
+    if (!v->width || !v->height || v->width > 1024 || v->height > 1024 || v->width % 4 || v->height % 4 ||
+        !v->frames || v->frames > 10000 || v->period_ms < 10 || v->period_ms > 10000 ||
+        v->frame_bytes != (uint32_t)v->width * v->height * 4 || u32(h + 24) != 64 ||
+        u32(h + 28) != 64 + v->frames * 24 || u32(h + 32) != (uint32_t)size)
+        goto bad;
+    uint32_t index_size = v->frames * 24, offset = u32(h + 28);
+    if (offset > (uint32_t)size)
+        goto bad;
+    p->index = allocate(index_size);
+    if (!p->index)
+        goto bad;
+    if (memory) memcpy(p->index, p->memory + 64, index_size);
+    if ((!memory && fread(p->index, 1, index_size, p->file) != index_size) || crc(p, p->index, index_size) != u32(h + 44))
+        goto bad;
+    uint32_t num_tiles = (uint32_t)v->width * v->height / 16;
+    uint32_t mask_bytes = (num_tiles + 7) / 8;
+    uint32_t max_possible_decoded = v->frame_bytes + num_tiles + 4096;
+    for (uint32_t i = 0; i < v->frames; i++) {
+        const uint8_t *r = p->index + i * 24;
+        uint32_t length = u32(r + 4), decoded = u32(r + 8);
+        uint8_t mode = r[16];
+        if (u32(r) != offset || !length || length > max_possible_decoded || mode > 6 || r[17] ||
+            u16(r + 18) || (!i && mode != EAF4_MODE_RAW && mode != EAF4_MODE_BTC8888_SAFE) ||
+            offset > (uint32_t)size || length > (uint32_t)size - offset)
+            goto bad;
+        if (mode <= EAF4_MODE_PLANAR && decoded != v->frame_bytes)
+            goto bad;
+        if ((mode == EAF4_MODE_TILE_PLANAR || mode == EAF4_MODE_TILE_PACKED) &&
+            (decoded < mask_bytes || decoded > v->frame_bytes + mask_bytes || (decoded - mask_bytes) % 64))
+            goto bad;
+        if (mode == EAF4_MODE_JOINT_DELTA &&
+            (decoded < mask_bytes || decoded > v->frame_bytes + num_tiles * 16 + mask_bytes))
+            goto bad;
+        if (mode == EAF4_MODE_BTC8888_SAFE &&
+            (decoded < num_tiles || decoded > v->frame_bytes + num_tiles))
+            goto bad;
+        offset += length;
+        if (length > p->max_compressed)
+            p->max_compressed = length;
+        if (mode != EAF4_MODE_RAW && decoded > p->max_decoded)
+            p->max_decoded = decoded;
+    }
+    if (offset != (uint32_t)size)
+        goto bad;
+    if (p->max_decoded == 0)
+        p->max_decoded = 64;
+    p->compressed = allocate(p->max_compressed);
+    p->scratch = allocate(p->max_decoded);
+    p->frame = allocate(v->frame_bytes);
+    if (!p->compressed || !p->scratch || !p->frame)
+        goto bad;
+    memset(p->frame, 0, v->frame_bytes);
+    /* Optional compressed-data cache. Keep the streaming buffers so allocation
+     * failure still permits playback without changing the on-disk format. */
+    p->cached_offset = 64 + index_size;
+    size_t payload_size = (size_t)size - p->cached_offset;
+    if (!memory && payload_size <= 4 * 1024 * 1024) {
+        p->cached = allocate(payload_size);
+        if (p->cached) {
+            p->cached_bytes = payload_size;
+            if (fseek(p->file, p->cached_offset, SEEK_SET) ||
+                fread(p->cached, 1, payload_size, p->file) != payload_size) {
+#ifdef ESP_PLATFORM
+                release_buffer(p->cached, p->cached_bytes);
+#else
+                free(p->cached);
+#endif
+                p->cached = NULL;
+                p->cached_bytes = 0;
+                clearerr(p->file);
+            }
+        }
+    }
+#ifdef ESP_PLATFORM
+    ESP_LOGI("eaf4", "compressed cache: %s, payload=%lu bytes",
+             p->cached ? "PSRAM" : "streaming", (unsigned long)payload_size);
+#endif
+    *out = p;
+    return 0;
+bad:
+    eaf4_close(p);
+    return -1;
+}
+
+int eaf4_next(eaf4_t *p, const uint8_t **pixels, uint32_t *frame_index)
+{
+    if (!p || !pixels)
+        return -1;
+    const uint8_t *r = p->index + p->next * 24;
+    uint32_t length = u32(r + 4), decoded = u32(r + 8);
+    uint8_t mode = r[16];
+    int64_t start = NOW_US();
+    const uint8_t *compressed = p->memory ? p->memory + u32(r) : p->cached ? p->cached + u32(r) - p->cached_offset : p->compressed;
+    if ((!p->memory && !p->cached && (fseek(p->file, u32(r), SEEK_SET) ||
+                       fread(p->compressed, 1, length, p->file) != length)) ||
+        crc(p, compressed, length) != u32(r + 20))
+        return -1;
+    p->timing.read_us = (uint32_t)(NOW_US() - start);
+    start = NOW_US();
+    uLongf dest = decoded;
+    uLong input = length;
+    uint8_t *inflate_dst = (mode == EAF4_MODE_RAW) ? p->frame : p->scratch;
+    if (uncompress2(inflate_dst, &dest, compressed, &input) != Z_OK || dest != decoded || input != length)
+        return -1;
+    p->timing.inflate_us = (uint32_t)(NOW_US() - start);
+    start = NOW_US();
+    const esp_eaf_codec_ops_t *codec = esp_eaf_codec_find(ESP_EAF_CONTAINER_EAF8888, mode);
+    if (!codec) return -1;
+    esp_eaf_codec_request_t request = {
+        .container = ESP_EAF_CONTAINER_EAF8888,
+        .mode = mode,
+        .frame = p->frame,
+        .scratch = mode == EAF4_MODE_RAW ? p->frame : p->scratch,
+        .decoded_size = decoded,
+        .frame_bytes = p->info.frame_bytes,
+        .frame_width = p->info.width,
+        .frame_height = p->info.height,
+    };
+    if (codec->decode(&request) != 0) return -1;
+    p->timing.reconstruct_us = (uint32_t)(NOW_US() - start);
+#ifndef ESP_PLATFORM
+    start = NOW_US();
+    if (crc(p, p->frame, p->info.frame_bytes) != u32(r + 12))
+        return -1;
+    p->timing.crc_us = (uint32_t)(NOW_US() - start);
+#else
+    p->timing.crc_us = 0;
+#endif
+    *pixels = p->frame;
+    if (frame_index)
+        *frame_index = p->next;
+    p->next = (p->next + 1) % p->info.frames;
+    return 0;
+}
+
+int eaf4_seek(eaf4_t *p, uint32_t target_frame, const uint8_t **pixels)
+{
+    if (!p || target_frame >= p->info.frames)
+        return -1;
+    if (p->has_seek_snapshot && p->seek_snapshot && p->seek_snapshot_frame == target_frame) {
+        memcpy(p->frame, p->seek_snapshot, p->info.frame_bytes);
+        p->next = (target_frame + 1) % p->info.frames;
+        if (pixels)
+            *pixels = p->frame;
+        return 0;
+    }
+    uint32_t key = target_frame;
+    while (key > 0 && p->index[key * 24 + 16] != EAF4_MODE_RAW)
+        key--;
+    p->next = key;
+    const uint8_t *px = NULL;
+    for (uint32_t f = key; f <= target_frame; f++) {
+        if (eaf4_next(p, &px, NULL) != 0)
+            return -1;
+    }
+    if (key != target_frame) {
+        if (!p->seek_snapshot)
+            p->seek_snapshot = allocate(p->info.frame_bytes);
+        if (p->seek_snapshot) {
+            memcpy(p->seek_snapshot, p->frame, p->info.frame_bytes);
+            p->seek_snapshot_frame = target_frame;
+            p->has_seek_snapshot = true;
+        }
+    }
+    if (pixels)
+        *pixels = px;
+    return 0;
+}
+
+int eaf4_open(const char *path, eaf4_t **out) { return open_source(path, NULL, 0, out); }
+int eaf4_open_memory(const void *data, size_t size, eaf4_t **out) { return open_source(NULL, data, size, out); }

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""EAF 0x0C (Lossless-RGBA) encoder: PNG sequences -> flash asset blob + C scene table.
+"""EAF codec 0x04 (LOSSLESS RGB565+A8) encoder and asset packer.
 
 Each scene is a folder of RGBA PNG frames (sorted by file name). Frames are converted to
 RGB565 with the 8x8 Bayer ordered dither used by the LVGL UI, kept bit-exact together with
@@ -9,15 +9,15 @@ the 8-bit alpha plane, and encoded as:
               -1..1, everything else stored as absolute values in a separate escape stream
 Both streams are raw deflate (zopfli by default), decoded on the device by the ROM inflater.
 
-Outputs (defaults relative to the demo project):
-  assets/<scene>.eaf        one EAF file per scene
-  assets/eaf_assets.bin     all scenes, 64-byte aligned, flashed to the `eaf_assets` partition
-  assets/animation.json     offsets, sizes and per-frame CRC32 (RGB565 little-endian + A8)
-  main/eaf_scenes.h         the same table as C, used by the demo for playback and validation
+Outputs (under build/lossless565_pack by default):
+  <scene>.eaf               one EAF file per scene
+  eaf_assets.bin            all scenes, 64-byte aligned
+  animation.json            offsets, sizes and per-frame CRC32 (RGB565 little-endian + A8)
+  eaf_scenes.h              the same table as C
 
 Usage:
-  python3 tools/eaf_encode.py                       # the three customer scenes
-  python3 tools/eaf_encode.py --scene "MY SCENE=path/to/pngs" [--scene ...] [--fast]
+  python3 -m encoder.eaf565_lossless_rgba --fast
+  python3 -m encoder.eaf565_lossless_rgba --scene "MY_SCENE=path/to/pngs" [--scene ...] [--fast]
 """
 import argparse
 import glob
@@ -32,11 +32,11 @@ import numpy as np
 from PIL import Image
 
 DEMO_DIR = Path(__file__).resolve().parents[1]
-DEFAULT_SRC = DEMO_DIR / "assets" / "src"
+DEFAULT_SRC = DEMO_DIR / "assets" / "synthetic"
 DEFAULT_SCENES = [
-    ("FIRST RINSING", DEFAULT_SRC / "_FIRST RINSING_Correct 15fps No background"),
-    ("WAVES", DEFAULT_SRC / "_WAVES_Correct 15fps No background"),
-    ("DESCALING", DEFAULT_SRC / "_DESCALING_Correct 15fps No background"),
+    ("ALPHA_GLOW", DEFAULT_SRC / "alpha_glow"),
+    ("FLAT_UI", DEFAULT_SRC / "flat_ui"),
+    ("MICRO_MOTION", DEFAULT_SRC / "micro_motion"),
 ]
 
 ENCODING_LOSSLESS_RGBA = 0x04
@@ -252,10 +252,10 @@ def parse_scene(arg: str):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--scene", action="append", type=parse_scene, metavar="NAME=PNG_DIR",
-                    help="scene name and PNG folder, repeat for several scenes (default: the 3 customer scenes)")
-    ap.add_argument("--out", type=Path, default=DEMO_DIR / "assets", help="output folder for .eaf/.bin/.json")
-    ap.add_argument("--header", type=Path, default=DEMO_DIR / "main" / "eaf_scenes.h", help="generated C scene table")
-    ap.add_argument("--block-height", type=int, default=120, help="rows per block, multiple of 4 (default 120)")
+                    help="scene name and PNG folder, repeat for several scenes (default: 3 public synthetic scenes)")
+    ap.add_argument("--out", type=Path, default=DEMO_DIR / "build" / "lossless565_pack", help="output folder for .eaf/.bin/.json")
+    ap.add_argument("--header", type=Path, default=DEMO_DIR / "build" / "lossless565_pack" / "eaf_scenes.h", help="generated C scene table")
+    ap.add_argument("--block-height", type=int, default=40, help="rows per block, multiple of 4 (default 40)")
     ap.add_argument("--fast", action="store_true", help="zlib level 9 instead of zopfli (~11%% larger, seconds instead of minutes)")
     ap.add_argument("--zopfli-iterations", type=int, default=5)
     args = ap.parse_args()
@@ -263,6 +263,7 @@ def main():
     scenes_in = args.scene or DEFAULT_SCENES
     deflate = Deflater(args.fast, args.zopfli_iterations)
     args.out.mkdir(parents=True, exist_ok=True)
+    args.header.parent.mkdir(parents=True, exist_ok=True)
 
     blob = bytearray()
     scenes = []

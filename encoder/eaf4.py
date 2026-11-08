@@ -1,12 +1,15 @@
-"""EAF4 BGRA8888 codec supporting all converged 8888 modes (Modes 0..6):
+"""EAF4 BGRA8888 codec using frame submodes 0..6.
+
+Submodes 0..5 are representations of unified codec 0x04 (LOSSLESS); submode 6
+is unified codec 0x05 (BTC_SAFE). They are not top-level codec IDs.
 
   - Mode 0 (MODE_RAW)          : Full-frame BGRA8888 Deflate (Keyframe, lossless)
   - Mode 1 (MODE_XOR)          : Full-frame BGRA8888 32-bit XOR Deflate (lossless)
-  - Mode 2 (MODE_PLANAR)       : 0x0A extended to 8888 — 4-plane (B,G,R,A) XOR Deflate (lossless)
-  - Mode 3 (MODE_TILE_PLANAR)  : 0x0C extended to 8888 — 4x4 tile mask + 4-plane XOR Deflate (lossless)
+  - Mode 2 (MODE_PLANAR)       : 4-plane (B,G,R,A) XOR Deflate (lossless)
+  - Mode 3 (MODE_TILE_PLANAR)  : 4x4 tile mask + 4-plane XOR Deflate (lossless)
   - Mode 4 (MODE_TILE_PACKED)  : 4x4 tile mask + interleaved 32-bit BGRA word XOR Deflate (lossless, fast)
-  - Mode 5 (MODE_JOINT_DELTA)  : 0x0C joint ternary symbol (-1..1)^4 + 4-plane escape Deflate (lossless)
-  - Mode 6 (MODE_BTC8888_SAFE) : 0x09 extended to 8888 — 4x4 error-bounded BTC with 64B raw escape
+  - Mode 5 (MODE_JOINT_DELTA)  : joint ternary symbol (-1..1)^4 + 4-plane escape Deflate (lossless)
+  - Mode 6 (MODE_BTC8888_SAFE) : 4x4 error-bounded BTC with 64B raw escape
 """
 
 from __future__ import annotations
@@ -193,7 +196,7 @@ def encode(
     """Encode BGRA8888 frames into an EAF4 container.
 
     profiles:
-      - "v1"          : adaptive over lossless modes 0..3 (identical to LSM_DEMO_V1.3)
+      - "v1"          : adaptive over legacy-compatible lossless modes 0..3
       - "v2"          : adaptive over lossless modes 0..5 (includes Tile-Packed & Joint-Delta)
       - "tile_packed" : force Mode 0 on keyframes and Mode 4 (Tile-Packed 32-bit XOR) on inter-frames
       - "btc8888"     : Mode 6 (BTC-8888 Safe error-bounded 4x4 blocks with 64B raw escape)

@@ -1,0 +1,16 @@
+{
+  "created": "2026-11-08",
+  "tool": "OpenAI built-in image generation",
+  "assets": [
+    {
+      "file": "robot_mascot.png",
+      "sha256": "5c32669727c0e0661bd47f35168334ca160a2356083281a1ce2bc8f697edf2e2",
+      "prompt": "Create one original friendly small robot mascot, full body, centered, designed for a UI assistant animation. Rounded white ceramic shell, warm orange and navy accents, expressive dark face screen with two simple bright eyes, compact limbs, polished high-quality 3D illustration. Square image, entire character visible with generous padding, front three-quarter pose. Perfectly flat removable chroma-key background; no green on the character, cast shadow, text, logo, watermark, extra object or extra character."
+    },
+    {
+      "file": "mountain_lake.png",
+      "sha256": "9b2b7f54fa12f0f6a0ec78ce1f9ebe1eecc5a64e8f1b7d42a828f361fba0646c",
+      "prompt": "Create an original photorealistic wide mountain-lake landscape for testing animation and image compression. Alpine lake with detailed evergreen forest, rocky shoreline, layered mountains, soft clouds, subtle mist, realistic water reflections, fine natural textures and broad smooth sky gradients. Cinematic 16:9 eye-level shore view with foreground-to-background depth and natural early-morning side light. Geographically generic; no people, buildings, vehicles, signs, logos, text, border or watermark; avoid extreme HDR, oversaturation and shallow depth of field."
+    }
+  ]
+}

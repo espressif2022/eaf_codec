@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Full 8888 benchmark matrix on xiaobai animations in assets/xiaobai/.
+"""Run the full EAF4 benchmark matrix on a directory of animation folders.
 
 Measures:
   - Compression size & ratio across Modes 0..6 (v1, v2, tile_packed, btc8888)
@@ -9,6 +9,7 @@ Measures:
 
 from __future__ import annotations
 
+import argparse
 import json
 import math
 import re
@@ -35,7 +36,7 @@ from encoder.eaf4 import (  # noqa: E402
     load_bgra,
 )
 
-XIAOBAI_DIR = ROOT / "assets" / "xiaobai"
+DEFAULT_ASSETS_DIRS = (ROOT / "assets" / "synthetic", ROOT / "assets" / "visual")
 VERIFIER = ROOT / "build" / "eaf4_verify"
 
 
@@ -70,9 +71,12 @@ def measure_c_decode_us(blob: bytes, tmp_dir: Path) -> tuple[int, int]:
     return inflate_total // runs, recon_total // runs
 
 
-def main() -> int:
+def main(assets_dirs: list[Path]) -> int:
     subprocess.run(["make", "-C", str(ROOT), "all"], check=True)
-    report: dict = {"animations": []}
+    for assets_dir in assets_dirs:
+        if not assets_dir.is_dir():
+            raise FileNotFoundError(f"asset directory not found: {assets_dir}")
+    report: dict = {"assets_dirs": [str(path) for path in assets_dirs], "animations": []}
 
     print("=" * 112)
     print(f"{'Animation':<22} {'Codec / Mode':<20} {'Size (KB)':>10} {'Ratio':>8} {'Inflate(us)':>12} {'Recon(us)':>10} {'PSNR(dB)':>9} {'MaxErr':>6}")
@@ -80,7 +84,13 @@ def main() -> int:
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp_dir = Path(tmp)
-        for folder_path in sorted(XIAOBAI_DIR.iterdir()):
+        folders = [
+            folder
+            for assets_dir in assets_dirs
+            for folder in sorted(assets_dir.iterdir())
+            if folder.is_dir()
+        ]
+        for folder_path in folders:
             if not folder_path.is_dir():
                 continue
             paths = sorted(folder_path.glob("frame_*.png"))
@@ -101,7 +111,7 @@ def main() -> int:
                 ("Mode 5 Joint-Delta", dict(forced_mode=MODE_JOINT_DELTA)),
                 ("EAF4 v1 Adaptive", dict(profile="v1")),
                 ("EAF4 v2 Adaptive", dict(profile="v2")),
-                ("Mode 6 BTC8888-Safe", dict(profile="btc8888", btc_max_error=8)),
+                ("Mode 6 EAF Bounded", dict(profile="btc8888", btc_max_error=8)),
             ]
 
             for label, kwargs in configs:
@@ -134,4 +144,13 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "assets_dirs",
+        nargs="*",
+        type=Path,
+        help="directories containing frame_*.png scene folders (default: synthetic + visual)",
+    )
+    args = parser.parse_args()
+    paths = [path.resolve() for path in (args.assets_dirs or DEFAULT_ASSETS_DIRS)]
+    raise SystemExit(main(paths))

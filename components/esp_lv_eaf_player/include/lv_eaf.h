@@ -95,14 +95,14 @@ void lv_eaf_resume(lv_obj_t * obj);
 bool lv_eaf_is_loaded(lv_obj_t * obj);
 
 /**
- * Get the loop count for the EAF animation.
+ * Get the configured loop count. This can be queried before a source is loaded.
  * @param obj pointer to an EAF animation object
  * @return the loop count (-1 for infinite loop)
  */
 int32_t lv_eaf_get_loop_count(lv_obj_t * obj);
 
 /**
- * Set the loop count for the EAF animation.
+ * Set the loop count for the EAF animation. This can be configured before loading a source.
  * @param obj   pointer to an EAF animation object
  * @param count the loop count to set (-1 for infinite loop)
  */
@@ -134,21 +134,21 @@ void lv_eaf_set_planar_rom(lv_obj_t *obj, bool enabled);
 void lv_eaf_set_color_key(lv_obj_t *obj, int32_t color_key);
 
 /**
- * Get the frame delay in milliseconds.
+ * Get the configured frame delay in milliseconds. This can be queried before a source is loaded.
  * @param obj pointer to an EAF animation object
  * @return frame delay in milliseconds
  */
 uint32_t lv_eaf_get_frame_delay(lv_obj_t * obj);
 
 /**
- * Enable or disable animation looping.
+ * Enable or disable animation looping. This can be configured before loading a source.
  * @param obj    pointer to an EAF animation object
  * @param enable true to enable looping, false to disable
  */
 void lv_eaf_set_loop_enabled(lv_obj_t * obj, bool enable);
 
 /**
- * Check if animation looping is enabled.
+ * Check if animation looping is enabled. This can be queried before a source is loaded.
  * @param obj pointer to an EAF animation object
  * @return true if looping is enabled, false otherwise
  */

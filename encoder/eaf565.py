@@ -2,16 +2,14 @@
 """
 Video / Animation to Optimized EAF Converter for ESP32 (esp_lv_eaf_player)
 
-Converged Production Standard Modes:
-1. --mode lossless-rgba : [Core Alpha] 100% Bit-Exact Lossless 3-Plane RGB565_Lo/Hi XOR + A8 Delta (encoding 0x0C)
-2. --mode btc-safe      : [Core Spatial] Error-bounded 4x4 Delta-BTC with 32B verbatim RGB565 escape (encoding 0x09, default)
-3. --mode quad-abbrev   : [Core Natural] Two-level 16x16/8x8 quadtree + shared-table Abbreviated JPEG (encoding 0x08)
-4. --mode h264          : [Core Ultra-Compact] EAF H.264 Constrained Baseline (encoding 0x07, via esp_h264)
-5. --mode btc-alpha     : [Optional Lossy Alpha] 4x4 Delta-BTC + 8-bit BC4/DXT5 Alpha interpolation (encoding 0x0B)
+Production codecs (public name; internal implementation name):
+1. --mode lossless   : codec 0x04, bit-exact RGB565+A8 three-plane temporal delta
+2. --mode bounded    : codec 0x05, error-bounded 4x4 BTC (`btc-safe`)
+3. --mode jpeg-delta : codec 0x06, changed-region Abbreviated JPEG (`quad-jpeg`)
+4. --mode video      : codec 0x07, H.264 Constrained Baseline (`h264`)
 
-Other modes: `jpeg` (one 0x02 block per frame) and `strip-delta` (0x02 stripes with skips).
-The former `tile-delta` (0x04), `abbrev-delta` (0x05) and `btc-zlib` (0x06) were removed
-together with their decoders; re-encode such assets with one of the modes above.
+The decoder retains aliases for pre-convergence bytecodes, but this encoder only emits
+the contiguous production IDs above.
 """
 import argparse
 import glob
@@ -253,7 +251,7 @@ def convert_to_eaf(
             frames_data.append(bytes(hdr) + b''.join(block_datas))
 
     elif mode == "btc-safe":
-        # Encoding 0x09: uint32 raw length + raw Deflate. After inflation:
+        # Codec 0x05: uint32 raw length + raw Deflate. After inflation:
         # one mode byte per 4x4 tile, then interleaved tile payloads.
         # 0=skip, 1=flat(2B), 2=two colors(6B), 3=four colors(8B),
         # 4=verbatim RGB565(32B). Escape guarantees a per-channel error bound.
@@ -483,9 +481,10 @@ if __name__ == "__main__":
     parser.add_argument("-o", "--output", required=True, help="Output .eaf file path")
     parser.add_argument(
         "--mode",
-        choices=["lossless", "btc-safe", "quad-jpeg", "h264"],
-        default="btc-safe",
-        help="4 converged production modes: lossless (0x04), btc-safe (0x05), quad-jpeg (0x06), h264 (0x07)",
+        choices=["lossless", "bounded", "jpeg-delta", "video", "btc-safe", "quad-jpeg", "h264"],
+        default="bounded",
+        metavar="{lossless,bounded,jpeg-delta,video}",
+        help="public modes: lossless (0x04), bounded (0x05), jpeg-delta (0x06), video (0x07)",
     )
     parser.add_argument("--fps", type=int, default=15)
     parser.add_argument("--width", type=int, default=240)
@@ -497,15 +496,21 @@ if __name__ == "__main__":
     parser.add_argument("--keyframe-interval", type=int, default=60, help="Full refresh every N frames; 0 disables periodic refresh")
     parser.add_argument("--jpeg-subsampling", type=int, choices=[0, 1, 2], default=0, help="0=4:4:4 (default), 1=4:2:2, 2=4:2:0")
     parser.add_argument("--h264-crf", type=int, default=20)
-    parser.add_argument("--btc-max-error", type=int, default=8, help="btc-safe maximum RGB channel error versus RGB565 source")
+    parser.add_argument("--max-error", "--btc-max-error", dest="btc_max_error", type=int, default=8,
+                        help="bounded maximum RGB channel error versus RGB565 source")
     args = parser.parse_args()
 
     with tempfile.TemporaryDirectory() as tmpdir:
         frame_files = extract_frames(args.input, tmpdir, fps=args.fps, width=args.width, height=args.height)
+        internal_mode = {
+            "bounded": "btc-safe",
+            "jpeg-delta": "quad-jpeg",
+            "video": "h264",
+        }.get(args.mode, args.mode)
         sz = convert_to_eaf(
             frame_files,
             args.output,
-            mode=args.mode,
+            mode=internal_mode,
             quality=args.quality,
             denoise_median=args.denoise_median,
             circle_roi=args.circle_roi,

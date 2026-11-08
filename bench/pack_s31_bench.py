@@ -1,21 +1,22 @@
 #!/usr/bin/env python3
-"""Generate Multi-Asset Benchmark Pack (MBPK) for ESP32-S31 hardware evaluation
-and compute exact PSNR / MaxErr metrics across all converged EAF/EAF4 modes (0x00..0x07).
+"""Build a reproducible public MBPK image for ESP32-S31/P4 benchmarks.
+
+All entries come from public procedural/generated assets or checked-in legacy
+compatibility samples. The script never reads private source material.
 """
 
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 import re
 import struct
 import sys
 import tempfile
-import zlib
 from pathlib import Path
 
 import numpy as np
-from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -24,17 +25,10 @@ sys.path.insert(0, str(ROOT / "tools"))
 from encoder.eaf4 import decode as decode_eaf4, encode as encode_eaf4, load_bgra  # noqa: E402
 from encoder.eaf565 import (  # noqa: E402
     convert_to_eaf,
-    extract_scan_only,
+    encode_btc_block,
+    reconstruct_btc_block,
     rgb565_components,
     rgb_to_565_arr,
-)
-from eaf_inspector.parser import (  # noqa: E402
-    FRAME_BLOCK_LEN_SIZE,
-    FRAME_BLOCK_LEN_TABLE_OFFSET,
-    huffman_decode,
-    parse_file,
-    raw_decode,
-    rle_decode,
 )
 
 OUT_DIR = ROOT / "build" / "s31_bench_pack"
@@ -50,12 +44,13 @@ def compute_quality_bgra(src_frames: list[np.ndarray], recon_frames: list[np.nda
     sse_rgb = 0.0
     sse_a = 0.0
     max_err = 0
+    max_err_rgb = 0
     total_px = 0
     diff_px = 0
     for s, r in zip(src_frames, recon_frames):
         d = np.abs(s.astype(np.int32) - r.astype(np.int32))
         max_err = max(max_err, int(d.max()))
-        max_err_rgb = max(locals().get("max_err_rgb", 0), int(d[..., :3].max()))
+        max_err_rgb = max(max_err_rgb, int(d[..., :3].max()))
         d2 = d.astype(np.float64) ** 2
         sse += float(np.sum(d2))
         sse_rgb += float(np.sum(d2[..., :3]))
@@ -95,13 +90,45 @@ def simulate_565_lossless_recon(src_frames: list[np.ndarray]) -> list[np.ndarray
     return out
 
 
-def simulate_565_from_eaf_decode(eaf_bytes: bytes, src_frames: list[np.ndarray], mode: str) -> list[np.ndarray]:
-    """Compute reconstructed frames for 565 modes to measure exact PSNR vs 8888 source."""
+def simulate_565_encoder_reconstruction(src_frames: list[np.ndarray], mode: str) -> list[np.ndarray]:
+    """Reproduce the encoder's RGB565 reference frames for source-quality metrics."""
     if mode == "lossless":
         return simulate_565_lossless_recon(src_frames)
-    # For quad-jpeg or btc-safe, use encoder's internal reconstruction by decoding via PIL/565
+
+    if mode == "btc-safe":
+        out = []
+        height, width, _ = src_frames[0].shape
+        ref = np.zeros((height, width), dtype=np.uint16)
+        tiles_x = width // 4
+        for index, frame in enumerate(src_frames):
+            src_rgb = frame[..., [2, 1, 0]].astype(np.int32)
+            src = rgb_to_565_arr(src_rgb).astype(np.uint16)
+            blocks = src.reshape(height // 4, 4, tiles_x, 4).transpose(0, 2, 1, 3).reshape(-1, 16)
+            refs = ref.reshape(height // 4, 4, tiles_x, 4).transpose(0, 2, 1, 3).reshape(-1, 16).copy()
+            keyframe = index == 0
+            for tile, block in enumerate(blocks):
+                target = rgb565_components(block)
+                error = np.abs(target - rgb565_components(refs[tile]))
+                if not keyframe and error.max() <= 8 and error.mean() <= 0.8:
+                    continue
+                block_mode, endpoints, mask = encode_btc_block(target, 8)
+                rebuilt = reconstruct_btc_block(block_mode, endpoints, mask)
+                if np.max(np.abs(target - rgb565_components(rebuilt))) > 8:
+                    rebuilt = block
+                refs[tile] = rebuilt
+            ref = refs.reshape(height // 4, tiles_x, 4, 4).transpose(0, 2, 1, 3).reshape(height, width)
+            comp = rgb565_components(ref)
+            reconstructed = np.empty_like(frame)
+            reconstructed[..., 0] = comp[..., 2]
+            reconstructed[..., 1] = comp[..., 1]
+            reconstructed[..., 2] = comp[..., 0]
+            reconstructed[..., 3] = 255
+            out.append(reconstructed)
+        return out
+
+    # JPEG Delta quality is an encoder-side approximation; device CRC and timing
+    # still come from decoding the exact final EAF blob.
     from encoder.quad_jpeg import encode_quad_jpeg_frame
-    from encoder.btc8888 import encode_btc8888_frame
 
     out = []
     prev = np.zeros_like(src_frames[0])
@@ -116,10 +143,9 @@ def simulate_565_from_eaf_decode(eaf_bytes: bytes, src_frames: list[np.ndarray],
         f565[..., 1] = comp[..., 1]
         f565[..., 2] = comp[..., 0]
         f565[..., 3] = 255
-        if mode == "btc-safe":
-            _, _, rec = encode_btc8888_frame(f565, prev, keyframe=(i % 30 == 0), max_error=8)
-        else:
-            _, _, rec = encode_quad_jpeg_frame(f565, prev, hdr_state, keyframe=(i % 30 == 0), quality=82, subsampling=0)
+        _, _, rec = encode_quad_jpeg_frame(
+            f565, prev, hdr_state, keyframe=(i % 30 == 0), quality=82, subsampling=2
+        )
         # Re-quantize output to 565
         rgb_r = rec[..., [2, 1, 0]].astype(np.int32)
         c565_r = rgb_to_565_arr(rgb_r).astype(np.uint16)
@@ -146,40 +172,31 @@ def load_frame_sequence(folder: Path, prefix: str = "frame_", max_frames: int = 
 def main() -> int:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    datasets: list[tuple[str, str, list[Path], list[np.ndarray]]] = []
+    datasets: list[tuple[str, str, str, list[Path], list[np.ndarray]]] = []
 
-    # 1. Public xiaobai / emote datasets in assets/xiaobai
-    for name, desc in [
-        ("asking", "Emoji Asking (160x80, 15f)"),
-        ("kapi_smile", "Kapi Smile (360x360, 15f)"),
-        ("ui_demo", "UI Motion Demo (240x240, 15f)"),
-        ("transparent_emote", "Transparent Emote (152x152, 15f)"),
-    ]:
-        p_dir = ROOT / "assets" / "xiaobai" / name
-        if p_dir.is_dir():
-            paths, frames = load_frame_sequence(p_dir, "frame_", 15)
-            datasets.append((name, desc, paths, frames))
-
-    # 2. Full-screen 272x480 portrait benchmark sequences (if available locally on test machine)
-    local_s1 = Path("/home/xuxin/esp_work/customer/LSM_DEMO_V1.3/refer_sc/竖屏图库素材/动态_PictureMaterial_S/LIBRARY/S1")
-    if local_s1.is_dir():
-        for folder, prefix, alias, desc in [
-            ("20PM25/Green", "ADot", "full_glow_dot", "Full-Screen Glow Dot (272x480, 8f)"),
-            ("Water/Blue", "12WaterBlue", "full_water_wave", "Full-Screen Water Wave (272x480, 8f)"),
-            ("M0Air", "00Air", "full_air_flow", "Full-Screen Air Flow (272x480, 8f)"),
-            ("20Weather/Sandstorm", "A08_", "full_sandstorm", "Full-Screen Sandstorm (272x480, 8f)"),
-        ]:
-            fdir = local_s1 / folder
-            if fdir.is_dir():
-                paths, frames = load_frame_sequence(fdir, prefix, 8)
-                datasets.append((alias, desc, paths, frames))
+    # Procedural scenes use six frames; denser generated visuals use three. This
+    # keeps the combined pack within the default 6.875 MiB benchmark partition.
+    dataset_specs = [
+        ("synthetic", ROOT / "assets" / "synthetic", 6),
+        ("visual", ROOT / "assets" / "visual", 3),
+    ]
+    dataset_manifests = []
+    for dataset_name, dataset_root, max_frames in dataset_specs:
+        source_manifest = json.loads((dataset_root / "manifest.json").read_text(encoding="utf-8"))
+        dataset_manifests.append((dataset_name, source_manifest, max_frames))
+        descriptions = {entry["name"]: entry["description"] for entry in source_manifest["scenes"]}
+        for scene_dir in sorted(path for path in dataset_root.iterdir() if path.is_dir()):
+            paths, frames = load_frame_sequence(scene_dir, "frame_", max_frames)
+            if frames:
+                description = descriptions.get(scene_dir.name, "public benchmark scene")
+                datasets.append((dataset_name, scene_dir.name, f"{dataset_name}: {description}", paths, frames))
 
     entries_meta = []
     blobs: list[bytes] = []
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp_dir = Path(tmp)
-        for name, desc, paths, frames in datasets:
+        for dataset_name, name, desc, paths, frames in datasets:
             h, w, _ = frames[0].shape
             n_frames = len(frames)
             raw_8888_bytes = w * h * 4 * n_frames
@@ -187,18 +204,24 @@ def main() -> int:
             raw_565a8_bytes = w * h * 3 * n_frames
 
             # --- 8888 Modes (EAF4 container) ---
-            for codec_label, profile_arg, codec_id_str in [
-                ("0x04_Lossless_8888_v1", "v1", "0x04 LOSSLESS (8888 v1)"),
-                ("0x04_Lossless_8888_v2", "v2", "0x04 LOSSLESS (8888 v2 Joint)"),
-                ("0x04_Lossless_8888_Fast", "tile_packed", "0x04 LOSSLESS (8888 Tile-Packed)"),
-                ("0x05_BTC_Safe_8888", "btc8888", "0x05 BTC_SAFE (8888 maxErr<=8)"),
-            ]:
+            eaf4_modes = [
+                ("0x04_Lossless_8888_v1", "v1", "0x04 EAF Lossless (8888 v1)"),
+                ("0x04_Lossless_8888_v2", "v2", "0x04 EAF Lossless (8888 v2)"),
+                ("0x04_Lossless_8888_Fast", "tile_packed", "0x04 EAF Lossless (Tile-Packed)"),
+                ("0x05_Bounded_8888", "btc8888", "0x05 EAF Bounded (8888 MaxErr<=8)"),
+            ]
+            if dataset_name == "visual":
+                eaf4_modes = [eaf4_modes[1], eaf4_modes[3]]
+            for codec_label, profile_arg, codec_id_str in eaf4_modes:
                 blob, summary = encode_eaf4(frames, profile=profile_arg, btc_max_error=8)
                 recon = decode_eaf4(blob)
                 q = compute_quality_bgra(frames, recon)
+                q["quality_method"] = "eaf4_reference_decode"
+                q["quality_max_error"] = q["max_err"]
                 entries_meta.append(
                     {
                         "asset": name,
+                        "dataset": dataset_name,
                         "desc": desc,
                         "codec_key": codec_label,
                         "codec_title": codec_id_str,
@@ -219,11 +242,11 @@ def main() -> int:
 
             # --- 565 Modes (0x89 EAF container) ---
             five_modes = [
-                ("0x04_Lossless_565A8", "lossless", "0x04 LOSSLESS (565+A8)", raw_565a8_bytes),
-                ("0x05_BTC_Safe_565", "btc-safe", "0x05 BTC_SAFE (565 maxErr<=8)", raw_565_bytes),
+                ("0x04_Lossless_565A8", "lossless", "0x04 EAF Lossless (565+A8)", raw_565a8_bytes),
+                ("0x05_Bounded_565", "btc-safe", "0x05 EAF Bounded (565 bound=8)", raw_565_bytes),
             ]
             if w % 16 == 0 and h % 16 == 0:
-                five_modes.append(("0x06_Quad_JPEG_565", "quad-jpeg", "0x06 QUAD_JPEG (HW-Aligned)", raw_565_bytes))
+                five_modes.append(("0x06_JPEG_Delta_565", "quad-jpeg", "0x06 EAF JPEG Delta (HW-Aligned)", raw_565_bytes))
 
             for codec_label, mode565, codec_id_str, native_raw in five_modes:
                 out_eaf = tmp_dir / f"{name}_{codec_label}.eaf"
@@ -237,11 +260,18 @@ def main() -> int:
                     btc_max_error=8,
                 )
                 blob = out_eaf.read_bytes()
-                recon = simulate_565_from_eaf_decode(blob, frames, mode565)
+                recon = simulate_565_encoder_reconstruction(frames, mode565)
                 q = compute_quality_bgra(frames, recon)
+                q["quality_method"] = (
+                    "jpeg_encoder_reconstruction_approximation"
+                    if mode565 == "quad-jpeg"
+                    else "encoder_reconstruction_reference"
+                )
+                q["quality_max_error"] = q["max_err_rgb"]
                 entries_meta.append(
                     {
                         "asset": name,
+                        "dataset": dataset_name,
                         "desc": desc,
                         "codec_key": codec_label,
                         "codec_title": codec_id_str,
@@ -288,11 +318,14 @@ def main() -> int:
                         "compressed_bytes": len(blob),
                         "ratio_vs_8888": round((w * h * 4 * n_f) / len(blob), 2),
                         "ratio_vs_native": round((w * h * bpp * n_f) / len(blob), 2),
-                        "psnr_rgba_db": "Inf (8888 Palette)" if bpp == 4 else 48.2,
-                        "psnr_rgb_db": "Inf" if bpp == 4 else 48.2,
-                        "psnr_alpha_db": "Inf",
-                        "max_err": 0 if bpp == 4 else 7,
-                        "diff_pixel_ratio": 0.0,
+                        "psnr_rgba_db": "-",
+                        "psnr_rgb_db": "-",
+                        "psnr_alpha_db": "-",
+                        "max_err": "-",
+                        "max_err_rgb": "-",
+                        "quality_max_error": "-",
+                        "quality_method": "unavailable_without_source_frames",
+                        "diff_pixel_ratio": "-",
                     }
                 )
                 blobs.append(blob)
@@ -339,7 +372,28 @@ def main() -> int:
     pack_path = OUT_DIR / "s31_bench_pack.bin"
     pack_path.write_bytes(pack_bytes)
     manifest_path = OUT_DIR / "manifest.json"
-    manifest_path.write_text(json.dumps(entries_meta, ensure_ascii=False, indent=2) + "\n")
+    combined_hash = hashlib.sha256()
+    for dataset_name, source_manifest, _max_frames in dataset_manifests:
+        combined_hash.update(dataset_name.encode("utf-8"))
+        combined_hash.update(bytes.fromhex(source_manifest["dataset_pixel_sha256"]))
+    manifest = {
+        "schema": 1,
+        "dataset": "public-synthetic-and-visual-v1",
+        "dataset_pixel_sha256": combined_hash.hexdigest(),
+        "datasets": [
+            {
+                "name": dataset_name,
+                "generator_version": source_manifest["generator_version"],
+                "dataset_pixel_sha256": source_manifest["dataset_pixel_sha256"],
+                "frames_per_scene_in_pack": max_frames,
+            }
+            for dataset_name, source_manifest, max_frames in dataset_manifests
+        ],
+        "pack_file": pack_path.name,
+        "pack_bytes": total_size,
+        "entries": entries_meta,
+    }
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
     print(f"Packed {count} benchmark items into {pack_path} ({total_size / (1024*1024):.2f} MiB)")
     return 0
 

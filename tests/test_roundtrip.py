@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify Modes 0..6 across Python and C decoders, plus xiaobai asset roundtrip."""
+"""Verify EAF4 submodes 0..6 across Python/C plus unified CLI roundtrips."""
 
 from __future__ import annotations
 
@@ -102,7 +102,7 @@ def main() -> int:
             check=True,
         )
         subprocess.run(
-            [sys.executable, cli, "encode", "-o", str(btc8888_out), "--format", "8888", "--codec", "btc-safe", *[str(p) for p in paths]],
+            [sys.executable, cli, "encode", "-o", str(btc8888_out), "--format", "8888", "--codec", "bounded", *[str(p) for p in paths]],
             check=True,
         )
         subprocess.run(
@@ -110,11 +110,11 @@ def main() -> int:
             check=True,
         )
         subprocess.run(
-            [sys.executable, cli, "encode", "-o", str(eaf565_btc), "--format", "565", "--codec", "btc-safe", *[str(p) for p in paths]],
+            [sys.executable, cli, "encode", "-o", str(eaf565_btc), "--format", "565", "--codec", "bounded", *[str(p) for p in paths]],
             check=True,
         )
         subprocess.run(
-            [sys.executable, cli, "encode", "-o", str(eaf565_quad), "--format", "565", "--codec", "quad-jpeg", *[str(p) for p in paths]],
+            [sys.executable, cli, "encode", "-o", str(eaf565_quad), "--format", "565", "--codec", "jpeg-delta", *[str(p) for p in paths]],
             check=True,
         )
         for p_out in (v1_out, btc8888_out, eaf565_lossless, eaf565_btc, eaf565_quad):
@@ -132,7 +132,7 @@ def main() -> int:
             raise SystemExit("C header emission failed")
         batch_out = directory / "batch_out"
         subprocess.run(
-            [sys.executable, cli, "batch", str(ROOT / "assets" / "xiaobai"), "-o", str(batch_out), "--format", "8888", "--codec", "lossless"],
+            [sys.executable, cli, "batch", str(ROOT / "assets" / "synthetic"), "-o", str(batch_out), "--format", "8888", "--codec", "lossless"],
             check=True,
         )
         if not (batch_out / "eaf_assets.bin").is_file() or not (batch_out / "eaf_assets_table.h").is_file():
@@ -140,12 +140,10 @@ def main() -> int:
         verify_with_c(verifier, v1_out.read_bytes(), directory, "cli_v1")
         verify_with_c(verifier, btc8888_out.read_bytes(), directory, "cli_btc8888")
 
-        # 3. Verify xiaobai animation assets across v1, v2, tile_packed, btc8888
-        for clip_name in ("transparent_emote", "kapi_smile", "happy_loop"):
-            real_dir = ROOT / "assets" / "xiaobai" / clip_name
-            if not real_dir.is_dir():
-                continue
-            real_paths = sorted(real_dir.glob("frame_*.png"))
+        # 3. Verify representative public scenes across all EAF4 profiles.
+        for clip_name in ("alpha_glow", "micro_motion", "natural_motion"):
+            public_dir = ROOT / "assets" / "synthetic" / clip_name
+            real_paths = sorted(public_dir.glob("frame_*.png"))[:8]
             real_frames = [load_bgra(p) for p in real_paths]
             for prof in ("v1", "v2", "tile_packed", "btc8888"):
                 blob, summary = encode(real_frames, profile=prof, btc_max_error=8)
@@ -155,7 +153,7 @@ def main() -> int:
                     f"bytes={summary['bytes']:>7} modes={summary['mode_counts_all']}"
                 )
 
-    print("all modes (0..6) and xiaobai assets verified OK in Python and C")
+    print("all modes (0..6) and public synthetic assets verified OK in Python and C")
     return 0
 
 

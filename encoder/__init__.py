@@ -1,6 +1,8 @@
 """Unified EAF codec package:
-- EAF 565 / 565A8 container (0x89 "EAF", modes 0x00..0x0C) in `eaf565` & `eaf565_lossless_rgba`
-- EAF4 BGRA8888 container ("EAF4", modes 0..6) in `eaf4` & `btc8888`
+- EAF RGB565/RGB565A8 container (0x89 "EAF", codecs 0x00..0x07) in
+  `eaf565` and `eaf565_lossless_rgba`
+- EAF4 BGRA8888 container ("EAF4", frame submodes 0..6) in `eaf4` and
+  `btc8888`; submodes 0..5 implement codec 0x04 and submode 6 implements 0x05
 """
 
 from .eaf4 import (

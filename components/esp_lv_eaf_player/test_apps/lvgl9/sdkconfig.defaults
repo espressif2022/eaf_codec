@@ -1,4 +1,4 @@
-# For IDF 5.0
+# ESP32-S3 component-test defaults
 CONFIG_ESP_TASK_WDT_EN=n
 
 CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y

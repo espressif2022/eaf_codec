@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """Host converter, batch flash packager, C-array generator, and inspector for EAF/EAF4.
 
-Supports the 4 converged production codecs (0x04..0x07):
-  - 0x04 lossless  : 100% Bit-Exact Lossless (BGRA8888 in EAF4, RGB565+A8 in EAF)
-  - 0x05 btc-safe  : 4x4 Error-Bounded BTC + Raw Escape (maxErr <= 8, BGRA8888 & RGB565)
-  - 0x06 quad-jpeg : 16x16+8x8 Quadtree Delta Strip JPEG (HW JPEG aligned, RGB888 & RGB565, no alpha)
-  - 0x07 h264      : Constrained Baseline I/P Video Stream (RGB888 & RGB565, no alpha)
+Public codec names:
+  - 0x04 lossless   : bit-exact BGRA8888 or RGB565+A8
+  - 0x05 bounded    : error-bounded 4x4 coding with raw escape
+  - 0x06 jpeg-delta : changed-region JPEG strips, no alpha
+  - 0x07 video      : inter-frame video stream, no alpha
+
+The implementation names btc-safe, quad-jpeg and h264 remain accepted as
+backward-compatible CLI aliases.
 """
 
 from __future__ import annotations
@@ -32,6 +35,32 @@ if str(ROOT / "tools") not in sys.path:
 from encoder.eaf4 import INDEX, INDEX_SIZE, MODE_NAMES, decode, encode  # noqa: E402
 from encoder.eaf565 import convert_to_eaf  # noqa: E402
 from eaf_inspector.parser import parse_file, print_text  # noqa: E402
+
+
+PUBLIC_CODEC_NAMES = ("lossless", "bounded", "jpeg-delta", "video")
+CODEC_ALIASES = {
+    "lossless": "lossless",
+    "bounded": "btc-safe",
+    "jpeg-delta": "quad-jpeg",
+    "video": "h264",
+    # Pre-2.0 implementation-oriented CLI names.
+    "btc-safe": "btc-safe",
+    "quad-jpeg": "quad-jpeg",
+    "h264": "h264",
+}
+INTERNAL_TO_PUBLIC = {
+    "lossless": "lossless",
+    "btc-safe": "bounded",
+    "quad-jpeg": "jpeg-delta",
+    "h264": "video",
+}
+
+
+def _normalize_codec(name: str) -> str:
+    try:
+        return CODEC_ALIASES[name]
+    except KeyError as exc:
+        raise ValueError(f"unknown codec: {name}") from exc
 
 
 def _natural_sort_key(path: Path) -> tuple:
@@ -187,10 +216,11 @@ def _parse_resize(val: str | None) -> tuple[int, int] | None:
 
 def _encode(args: argparse.Namespace) -> int:
     resize = _parse_resize(args.resize)
+    internal_codec = _normalize_codec(args.codec)
     blob, summary = _encode_single_to_bytes(
         inputs=args.frames,
         fmt=args.format,
-        codec=args.codec,
+        codec=internal_codec,
         lossless_profile=args.lossless_profile,
         period=args.period,
         key_interval=args.key_interval,
@@ -206,9 +236,10 @@ def _encode(args: argparse.Namespace) -> int:
         _write_c_header(blob, Path(args.c_header), sym)
 
     sub_info = f" submodes={summary['mode_counts_all']}" if "mode_counts_all" in summary else ""
+    public_codec = INTERNAL_TO_PUBLIC[internal_codec]
     print(
         f"wrote {args.output} container={summary['container']} format={summary['format']} "
-        f"codec={summary['codec']} {summary['width']}x{summary['height']} "
+        f"codec={public_codec} {summary['width']}x{summary['height']} "
         f"frames={summary['frames']} bytes={summary['bytes']}{sub_info}"
     )
     return 0
@@ -219,7 +250,8 @@ def _batch(args: argparse.Namespace) -> int:
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     resize = _parse_resize(args.resize)
-    ext = ".eaf4" if (args.format == "8888" and args.codec in ("lossless", "btc-safe")) else ".eaf"
+    internal_codec = _normalize_codec(args.codec)
+    ext = ".eaf4" if (args.format == "8888" and internal_codec in ("lossless", "btc-safe")) else ".eaf"
 
     targets: list[tuple[str, list[str]]] = []
     for child in sorted(in_dir.iterdir(), key=_natural_sort_key):
@@ -239,7 +271,7 @@ def _batch(args: argparse.Namespace) -> int:
         blob, summary = _encode_single_to_bytes(
             inputs=inp,
             fmt=args.format,
-            codec=args.codec,
+            codec=internal_codec,
             lossless_profile=args.lossless_profile,
             period=args.period,
             key_interval=args.key_interval,
@@ -264,7 +296,7 @@ def _batch(args: argparse.Namespace) -> int:
             "height": summary["height"],
             "frames": summary["frames"],
             "container": summary["container"],
-            "codec": summary["codec"],
+            "codec": INTERNAL_TO_PUBLIC[internal_codec],
             "crc32": f"0x{summary['crc32']:08X}",
         }
         manifest_items.append(item)
@@ -327,7 +359,7 @@ def _inspect(args: argparse.Namespace) -> int:
             m = rec[4]
             if 0 <= m < len(counts):
                 counts[m] += 1
-        codec_id = "0x05 BTC_SAFE" if counts[6] > 0 else "0x04 LOSSLESS"
+        codec_id = "0x05 EAF Bounded (BTC_SAFE)" if counts[6] > 0 else "0x04 EAF Lossless (LOSSLESS)"
         sub_str = ", ".join(f"{MODE_NAMES[m]}:{c}" for m, c in enumerate(counts) if c > 0)
         print(
             f"OK {args.file}\n"
@@ -349,7 +381,7 @@ def _inspect(args: argparse.Namespace) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Unified Host Converter & Packager for ESP EAF/EAF4 (0x04 lossless, 0x05 btc-safe, 0x06 quad-jpeg, 0x07 h264)"
+        description="ESP EAF/EAF4 tool (lossless, bounded, jpeg-delta, video)"
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -359,9 +391,10 @@ def main() -> int:
     enc.add_argument("--format", choices=["8888", "565"], default="8888", help="8888=BGRA8888, 565=RGB565/565A8")
     enc.add_argument(
         "--codec",
-        choices=["lossless", "btc-safe", "quad-jpeg", "h264"],
+        choices=list(CODEC_ALIASES),
         default="lossless",
-        help="0x04=lossless, 0x05=btc-safe, 0x06=quad-jpeg, 0x07=h264",
+        metavar="{lossless,bounded,jpeg-delta,video}",
+        help="public names: lossless, bounded, jpeg-delta, video (legacy aliases remain accepted)",
     )
     enc.add_argument(
         "--lossless-profile",
@@ -371,7 +404,10 @@ def main() -> int:
     )
     enc.add_argument("--period", type=int, default=67, help="Frame period in ms (default: 67 ms ~ 15 fps)")
     enc.add_argument("--key-interval", type=int, default=30, help="Keyframe interval for random seek (default: 30)")
-    enc.add_argument("--btc-max-error", type=int, default=8, help="Max channel error bound for 0x05 btc-safe")
+    enc.add_argument(
+        "--max-error", "--btc-max-error", dest="btc_max_error", type=int, default=8,
+        help="maximum channel error for 0x05 bounded (default: 8; --btc-max-error is a legacy alias)",
+    )
     enc.add_argument("--resize", default=None, help="Optional resize WIDTHxHEIGHT (e.g. 240x240)")
     enc.add_argument("--c-header", default=None, help="Optional path to emit C array header (.h)")
     enc.add_argument("--c-symbol", default=None, help="Optional C array identifier name")
@@ -381,11 +417,17 @@ def main() -> int:
     bat.add_argument("input_dir", help="Directory containing animation subfolders or .gif/.apng/.mp4 files")
     bat.add_argument("-o", "--output-dir", required=True, help="Output directory for .eaf4/.eaf, eaf_assets.bin, manifest.json, and eaf_assets_table.h")
     bat.add_argument("--format", choices=["8888", "565"], default="8888")
-    bat.add_argument("--codec", choices=["lossless", "btc-safe", "quad-jpeg", "h264"], default="lossless")
+    bat.add_argument(
+        "--codec",
+        choices=list(CODEC_ALIASES),
+        default="lossless",
+        metavar="{lossless,bounded,jpeg-delta,video}",
+        help="public codec name; pre-2.0 implementation names remain accepted as aliases",
+    )
     bat.add_argument("--lossless-profile", choices=["v1", "v2", "tile_packed"], default="v2")
     bat.add_argument("--period", type=int, default=67)
     bat.add_argument("--key-interval", type=int, default=30)
-    bat.add_argument("--btc-max-error", type=int, default=8)
+    bat.add_argument("--max-error", "--btc-max-error", dest="btc_max_error", type=int, default=8)
     bat.add_argument("--resize", default=None)
     bat.set_defaults(func=_batch)
 

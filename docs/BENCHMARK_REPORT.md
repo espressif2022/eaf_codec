@@ -1,183 +1,36 @@
-# ESP32-S31 EAF 压缩算法硬件实测报告（压缩率 · 解码效率 · 失真度 · 内存占用）
+# Device benchmark reports
 
-## 1. 测试平台与硬件环境
+The reproducible public hardware baseline is available for:
 
-- **目标芯片**：ESP32-S31 (Dual-Core RISC-V @ **320 MHz**, Revision v0.0, MAC `1c:29:04:d0:64:00`)
-- **外部存储**：16 MB Octal PSRAM @ **250 MHz**（64-Byte Cache Line）+ 8 MB SPI Flash
-- **硬件外设**：
-  - **PPA (Pixel Processing Accelerator)**：2D-DMA 硬件 `ARGB8888` 前景 + `RGB888` 背景混合
-  - **Hardware JPEG Decoder**：2D-DMA 硬件 JPEG 解码（已启用 `hb = 32 / 48` 宏块宽度对齐门卫检查）
-- **评测口径**：
-  - **纯解码耗时 (`Decode avg / P95 ms`)**：从 PSRAM 压缩缓存解压并重建完整像素缓冲的耗时（连续 3 轮循环统计）；
-  - **全管线耗时 (`Pipeline ms`)**：纯解码 + 一次 PPA 硬件 Alpha 混合输出至 RGB888 显存的总耗时；
-  - **失真度 (`PSNR dB` / `MaxErr`)**：重建像素相对于原始 32-bit `BGRA8888` 源图的峰值信噪比与全序列单通道最大绝对误差（`Inf / 0` 代表 100% 逐比特无损）；
-  - **内存占用 (`SRAM / PSRAM KB`)**：解码器实例常驻的内部高速 SRAM 与外部 PSRAM 峰值占用（含帧缓冲、解压工作区与索引表）。
+- [ESP32-S3-LCD-EV-Board-SUB2, 480×480](ESP32S3_480X480_BENCHMARK.md):
+  10/10 codec entries and 10/10 LCD preview updates passed at 240 MHz with
+  8 MB octal PSRAM at 80 MHz.
 
----
+Historical non-public measurements were intentionally removed because their source assets
+cannot be redistributed or independently reproduced. They must not be used as the public
+performance baseline for this repository.
 
-## 2. 收敛后编码体系 (`0x00 ~ 0x07`) 综合指标总表
+## Reproducible inputs
 
-### 2.1 `Emoji Asking (160x80, 15f)` — 原始 BGRA8888: `750.0 KB`
+- source scenes: `assets/synthetic` and `assets/visual`;
+- generators: `bench/generate_synthetic_assets.py` and `bench/generate_visual_assets.py`, version 1;
+- ESP32-S3 SUB2 480×480 packer: `bench/pack_esp32s3_480x480.py`;
+- general device packer: `bench/pack_s31_bench.py`;
+- firmware: `bench/s31_firmware`;
+- Host reference: [HOST_QUICK_BENCHMARK.md](HOST_QUICK_BENCHMARK.md).
 
-| 编码模式 (`0x00~0x07`) | 输出格式 | 压缩大小 (KB) | 压缩比 (vs 8888) | 纯解码均/P95 (ms) | 纯解码 FPS | +PPA 全管线 (ms / FPS) | 失真度 PSNR (dB) | 最大误差 MaxErr | 内存 SRAM / PSRAM (KB) |
-| :--- | :---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| **0x04 LOSSLESS (8888 v1)** | `BGRA8888` | `6.7` | **112.33x** | `0.62 / 1.51` | **1600.0** | `1.22 ms (821.0 fps)` | `Inf` | `0` | `8.5 / 52.0` |
-| **0x04 LOSSLESS (8888 v2 Joint)** | `BGRA8888` | `6.7` | **112.33x** | `0.62 / 1.51` | **1600.0** | `1.22 ms (821.7 fps)` | `Inf` | `0` | `8.5 / 52.0` |
-| **0x04 LOSSLESS (8888 Tile-Packed)** | `BGRA8888` | `9.0` | **82.90x** | `0.31 / 0.56` | **3205.1** | `0.85 ms (1169.6 fps)` | `Inf` | `0` | `8.5 / 58.6` |
-| **0x05 BTC_SAFE (8888 maxErr<=8)** | `BGRA8888` | `5.0` | **151.27x** | `0.18 / 0.36` | **5494.5** | `0.72 ms (1385.0 fps)` | `57.58` | `8` | `8.5 / 57.4` |
-| **0x04 LOSSLESS (565+A8)** | `RGB565A8` | `5.9` | **127.26x (95.4x vs 565)** | `0.30 / 0.58` | **3289.5** | `0.30 ms (3289.5 fps)` | `50.18` | `7` | `0.0 / 76.7` |
-| **0x05 BTC_SAFE (565 maxErr<=8)** | `RGB565` | `4.0` | **186.73x (93.4x vs 565)** | `0.35 / 0.42` | **2832.9** | `0.35 ms (2832.9 fps)` | `47.14 (RGB)` | `15 (RGB)` | `0.0 / 38.7` |
-| **0x06 QUAD_JPEG (HW-Aligned)** | `RGB565` | `5.1` | **146.85x (73.4x vs 565)** | `0.24 / 0.73` | **4132.2** | `0.24 ms (4132.2 fps)` | `41.56 (RGB)` | `41 (RGB)` | `0.0 / 38.7` |
+## Produce this report
 
-### 2.2 `Kapi Smile (360x360, 15f)` — 原始 BGRA8888: `7593.8 KB`
+Follow [DEVICE_TESTING.md](DEVICE_TESTING.md) to create and flash the public MBPK pack,
+capture the serial log, and run:
 
-| 编码模式 (`0x00~0x07`) | 输出格式 | 压缩大小 (KB) | 压缩比 (vs 8888) | 纯解码均/P95 (ms) | 纯解码 FPS | +PPA 全管线 (ms / FPS) | 失真度 PSNR (dB) | 最大误差 MaxErr | 内存 SRAM / PSRAM (KB) |
-| :--- | :---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| **0x04 LOSSLESS (8888 v1)** | `BGRA8888` | `33.0` | **230.20x** | `3.32 / 3.07` | **300.9** | `7.87 ms (127.1 fps)` | `Inf` | `0` | `8.5 / 552.3` |
-| **0x04 LOSSLESS (8888 v2 Joint)** | `BGRA8888` | `27.7` | **274.22x** | `3.64 / 3.71` | **275.0** | `8.13 ms (123.0 fps)` | `Inf` | `0` | `8.5 / 552.4` |
-| **0x04 LOSSLESS (8888 Tile-Packed)** | `BGRA8888` | `44.7` | **170.05x** | `3.14 / 2.75` | **318.8** | `7.67 ms (130.3 fps)` | `Inf` | `0` | `8.5 / 553.4` |
-| **0x05 BTC_SAFE (8888 maxErr<=8)** | `BGRA8888` | `29.6` | **256.74x** | `1.67 / 1.87` | **598.4** | `6.18 ms (161.8 fps)` | `64.74` | `8` | `8.5 / 559.9` |
-| **0x04 LOSSLESS (565+A8)** | `RGB565A8` | `42.7` | **177.76x (133.3x vs 565)** | `3.58 / 2.99` | **279.6** | `3.58 ms (279.6 fps)` | `43.16` | `7` | `0.0 / 764.9` |
-| **0x05 BTC_SAFE (565 maxErr<=8)** | `RGB565` | `27.5` | **276.62x (138.3x vs 565)** | `2.43 / 2.11` | **411.2** | `2.43 ms (411.2 fps)` | `41.85 (RGB)` | `15 (RGB)` | `0.0 / 380.9` |
+```bash
+make device-s3-report
+```
 
-### 2.3 `UI Motion Demo (240x240, 15f)` — 原始 BGRA8888: `3375.0 KB`
-
-| 编码模式 (`0x00~0x07`) | 输出格式 | 压缩大小 (KB) | 压缩比 (vs 8888) | 纯解码均/P95 (ms) | 纯解码 FPS | +PPA 全管线 (ms / FPS) | 失真度 PSNR (dB) | 最大误差 MaxErr | 内存 SRAM / PSRAM (KB) |
-| :--- | :---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| **0x04 LOSSLESS (8888 v1)** | `BGRA8888` | `298.0` | **11.33x** | `5.18 / 12.56` | **192.9** | `7.29 ms (137.2 fps)` | `Inf` | `0` | `8.5 / 447.6` |
-| **0x04 LOSSLESS (8888 v2 Joint)** | `BGRA8888` | `260.1` | **12.98x** | `5.16 / 11.39` | **193.9** | `7.25 ms (137.8 fps)` | `Inf` | `0` | `8.5 / 383.9` |
-| **0x04 LOSSLESS (8888 Tile-Packed)** | `BGRA8888` | `305.4` | **11.05x** | `4.82 / 11.11` | **207.5** | `6.92 ms (144.5 fps)` | `Inf` | `0` | `8.5 / 447.6` |
-| **0x05 BTC_SAFE (8888 maxErr<=8)** | `BGRA8888` | `122.5` | **27.56x** | `1.87 / 3.05` | **535.0** | `3.94 ms (253.7 fps)` | `41.59` | `8` | `8.5 / 306.8` |
-| **0x04 LOSSLESS (565+A8)** | `RGB565A8` | `130.4` | **25.88x (19.4x vs 565)** | `3.47 / 6.61` | **288.1** | `3.47 ms (288.1 fps)` | `38.27` | `7` | `0.0 / 342.0` |
-| **0x05 BTC_SAFE (565 maxErr<=8)** | `RGB565` | `169.1` | **19.95x (10.0x vs 565)** | `6.82 / 7.40` | **146.7** | `6.82 ms (146.7 fps)` | `32.77 (RGB)` | `15 (RGB)` | `0.0 / 170.0` |
-| **0x06 QUAD_JPEG (HW-Aligned)** | `RGB565` | `39.8` | **84.81x (42.4x vs 565)** | `2.49 / 4.83` | **401.6** | `2.49 ms (401.6 fps)` | `31.69 (RGB)` | `52 (RGB)` | `0.0 / 170.0` |
-
-### 2.4 `Transparent Emote (152x152, 15f)` — 原始 BGRA8888: `1353.8 KB`
-
-| 编码模式 (`0x00~0x07`) | 输出格式 | 压缩大小 (KB) | 压缩比 (vs 8888) | 纯解码均/P95 (ms) | 纯解码 FPS | +PPA 全管线 (ms / FPS) | 失真度 PSNR (dB) | 最大误差 MaxErr | 内存 SRAM / PSRAM (KB) |
-| :--- | :---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| **0x04 LOSSLESS (8888 v1)** | `BGRA8888` | `13.5` | **99.97x** | `3.53 / 3.55` | **283.0** | `4.46 ms (224.2 fps)` | `Inf` | `0` | `8.5 / 91.7` |
-| **0x04 LOSSLESS (8888 v2 Joint)** | `BGRA8888` | `13.5` | **99.97x** | `3.53 / 3.55` | **283.0** | `4.46 ms (224.3 fps)` | `Inf` | `0` | `8.5 / 91.7` |
-| **0x04 LOSSLESS (8888 Tile-Packed)** | `BGRA8888` | `19.7` | **68.78x** | `0.87 / 0.74` | **1145.5** | `1.81 ms (553.1 fps)` | `Inf` | `0` | `8.5 / 103.5` |
-| **0x05 BTC_SAFE (8888 maxErr<=8)** | `BGRA8888` | `12.7` | **106.44x** | `0.54 / 0.51` | **1862.2** | `1.48 ms (675.7 fps)` | `101.77` | `1` | `8.5 / 104.5` |
-| **0x04 LOSSLESS (565+A8)** | `RGB565A8` | `26.6` | **50.88x (38.2x vs 565)** | `0.84 / 0.91` | **1184.8** | `0.84 ms (1184.8 fps)` | `57.09` | `6` | `0.0 / 77.9` |
-| **0x05 BTC_SAFE (565 maxErr<=8)** | `RGB565` | `9.9` | **136.90x (68.5x vs 565)** | `0.67 / 0.61` | **1485.9** | `0.67 ms (1485.9 fps)` | `55.82 (RGB)` | `6 (RGB)` | `0.0 / 68.9` |
-
-### 2.5 `Full-Screen Glow Dot (272x480, 8f)` — 原始 BGRA8888: `4080.0 KB`
-
-| 编码模式 (`0x00~0x07`) | 输出格式 | 压缩大小 (KB) | 压缩比 (vs 8888) | 纯解码均/P95 (ms) | 纯解码 FPS | +PPA 全管线 (ms / FPS) | 失真度 PSNR (dB) | 最大误差 MaxErr | 内存 SRAM / PSRAM (KB) |
-| :--- | :---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| **0x04 LOSSLESS (8888 v1)** | `BGRA8888` | `3.8` | **1070.16x** | `3.11 / 20.29` | **321.1** | `7.49 ms (133.5 fps)` | `Inf` | `0` | `8.5 / 513.0` |
-| **0x04 LOSSLESS (8888 v2 Joint)** | `BGRA8888` | `3.0` | **1344.68x** | `3.04 / 20.28` | **328.4** | `7.42 ms (134.8 fps)` | `Inf` | `0` | `8.5 / 513.0` |
-| **0x04 LOSSLESS (8888 Tile-Packed)** | `BGRA8888` | `3.0` | **1344.68x** | `3.05 / 20.28` | **328.3** | `7.42 ms (134.8 fps)` | `Inf` | `0` | `8.5 / 513.0` |
-| **0x05 BTC_SAFE (8888 maxErr<=8)** | `BGRA8888` | `2.0` | **2070.33x** | `1.26 / 6.37` | **793.0** | `5.66 ms (176.6 fps)` | `83.55` | `8` | `8.5 / 550.3` |
-| **0x04 LOSSLESS (565+A8)** | `RGB565A8` | `2.4` | **1666.50x (1249.9x vs 565)** | `0.70 / 0.75` | **1424.5** | `0.70 ms (1424.5 fps)` | `71.62` | `6` | `0.0 / 385.6` |
-| **0x05 BTC_SAFE (565 maxErr<=8)** | `RGB565` | `1.2` | **3276.80x (1638.4x vs 565)** | `1.88 / 12.84` | **531.6** | `1.88 ms (531.6 fps)` | `67.94 (RGB)` | `14 (RGB)` | `0.0 / 383.7` |
-| **0x06 QUAD_JPEG (HW-Aligned)** | `RGB565` | `5.3` | **774.55x (387.3x vs 565)** | `29.12 / 41.00` | **34.3** | `29.12 ms (34.3 fps)` | `56.51 (RGB)` | `56 (RGB)` | `0.0 / 383.7` |
-
-### 2.6 `Full-Screen Water Wave (272x480, 8f)` — 原始 BGRA8888: `4080.0 KB`
-
-| 编码模式 (`0x00~0x07`) | 输出格式 | 压缩大小 (KB) | 压缩比 (vs 8888) | 纯解码均/P95 (ms) | 纯解码 FPS | +PPA 全管线 (ms / FPS) | 失真度 PSNR (dB) | 最大误差 MaxErr | 内存 SRAM / PSRAM (KB) |
-| :--- | :---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| **0x04 LOSSLESS (8888 v1)** | `BGRA8888` | `142.7` | **28.59x** | `6.04 / 23.56` | **165.5** | `10.47 ms (95.5 fps)` | `Inf` | `0` | `8.5 / 588.8` |
-| **0x04 LOSSLESS (8888 v2 Joint)** | `BGRA8888` | `144.4` | **28.25x** | `5.70 / 23.56` | **175.4** | `10.15 ms (98.6 fps)` | `Inf` | `0` | `8.5 / 588.8` |
-| **0x04 LOSSLESS (8888 Tile-Packed)** | `BGRA8888` | `144.4` | **28.25x** | `5.70 / 23.56` | **175.4** | `10.15 ms (98.6 fps)` | `Inf` | `0` | `8.5 / 588.8` |
-| **0x05 BTC_SAFE (8888 maxErr<=8)** | `BGRA8888` | `65.8` | **62.03x** | `2.60 / 11.05` | **385.2** | `7.03 ms (142.3 fps)` | `49.11` | `8` | `8.5 / 608.9` |
-| **0x04 LOSSLESS (565+A8)** | `RGB565A8` | `89.5` | **45.58x (34.2x vs 565)** | `5.32 / 24.91` | **187.8** | `5.32 ms (187.8 fps)` | `35.56` | `7` | `0.0 / 743.7` |
-| **0x05 BTC_SAFE (565 maxErr<=8)** | `RGB565` | `34.3` | **118.81x (59.4x vs 565)** | `4.30 / 13.95` | **232.8** | `4.30 ms (232.8 fps)` | `33.86 (RGB)` | `15 (RGB)` | `0.0 / 383.7` |
-| **0x06 QUAD_JPEG (HW-Aligned)** | `RGB565` | `18.1` | **225.14x (112.6x vs 565)** | `4.65 / 29.99` | **215.0** | `4.65 ms (215.0 fps)` | `29.63 (RGB)` | `96 (RGB)` | `0.0 / 383.7` |
-
-### 2.7 `Full-Screen Air Flow (272x480, 8f)` — 原始 BGRA8888: `4080.0 KB`
-
-| 编码模式 (`0x00~0x07`) | 输出格式 | 压缩大小 (KB) | 压缩比 (vs 8888) | 纯解码均/P95 (ms) | 纯解码 FPS | +PPA 全管线 (ms / FPS) | 失真度 PSNR (dB) | 最大误差 MaxErr | 内存 SRAM / PSRAM (KB) |
-| :--- | :---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| **0x04 LOSSLESS (8888 v1)** | `BGRA8888` | `422.8` | **9.65x** | `29.29 / 35.00` | **34.1** | `33.73 ms (29.6 fps)` | `Inf` | `0` | `8.5 / 1093.4` |
-| **0x04 LOSSLESS (8888 v2 Joint)** | `BGRA8888` | `426.0` | **9.58x** | `17.41 / 26.87` | **57.4** | `21.87 ms (45.7 fps)` | `Inf` | `0` | `8.5 / 763.9` |
-| **0x04 LOSSLESS (8888 Tile-Packed)** | `BGRA8888` | `426.0` | **9.58x** | `17.42 / 26.88` | **57.4** | `21.88 ms (45.7 fps)` | `Inf` | `0` | `8.5 / 763.9` |
-| **0x05 BTC_SAFE (8888 maxErr<=8)** | `BGRA8888` | `107.1` | **38.10x** | `4.08 / 13.62` | **244.9** | `8.59 ms (116.4 fps)` | `46.77` | `8` | `8.5 / 644.8` |
-| **0x04 LOSSLESS (565+A8)** | `RGB565A8` | `187.4` | **21.77x (16.3x vs 565)** | `12.34 / 22.24` | **81.1** | `12.34 ms (81.1 fps)` | `36.82` | `7` | `0.0 / 679.7` |
-| **0x05 BTC_SAFE (565 maxErr<=8)** | `RGB565` | `52.3` | **78.06x (39.0x vs 565)** | `6.51 / 14.46` | **153.5** | `6.51 ms (153.5 fps)` | `34.49 (RGB)` | `15 (RGB)` | `0.0 / 383.7` |
-| **0x06 QUAD_JPEG (HW-Aligned)** | `RGB565` | `37.2` | **109.59x (54.8x vs 565)** | `6.35 / 30.22` | **157.5** | `6.35 ms (157.5 fps)` | `30.64 (RGB)` | `99 (RGB)` | `0.0 / 383.7` |
-
-### 2.8 `Full-Screen Sandstorm (272x480, 8f)` — 原始 BGRA8888: `4080.0 KB`
-
-| 编码模式 (`0x00~0x07`) | 输出格式 | 压缩大小 (KB) | 压缩比 (vs 8888) | 纯解码均/P95 (ms) | 纯解码 FPS | +PPA 全管线 (ms / FPS) | 失真度 PSNR (dB) | 最大误差 MaxErr | 内存 SRAM / PSRAM (KB) |
-| :--- | :---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| **0x04 LOSSLESS (8888 v1)** | `BGRA8888` | `365.2` | **11.17x** | `25.32 / 28.18` | **39.5** | `29.70 ms (33.7 fps)` | `Inf` | `0` | `8.5 / 578.5` |
-| **0x04 LOSSLESS (8888 v2 Joint)** | `BGRA8888` | `365.2` | **11.17x** | `25.32 / 28.18` | **39.5** | `29.70 ms (33.7 fps)` | `Inf` | `0` | `8.5 / 578.5` |
-| **0x04 LOSSLESS (8888 Tile-Packed)** | `BGRA8888` | `655.5` | **6.22x** | `23.69 / 28.27` | **42.2** | `28.16 ms (35.5 fps)` | `Inf` | `0` | `8.5 / 872.1` |
-| **0x05 BTC_SAFE (8888 maxErr<=8)** | `BGRA8888` | `134.9` | **30.24x** | `7.49 / 11.60` | **133.5** | `11.99 ms (83.4 fps)` | `47.12` | `8` | `8.5 / 672.0` |
-| **0x04 LOSSLESS (565+A8)** | `RGB565A8` | `416.9` | **9.79x (7.3x vs 565)** | `17.07 / 20.96` | **58.6** | `17.07 ms (58.6 fps)` | `42.7` | `7` | `0.0 / 567.7` |
-| **0x05 BTC_SAFE (565 maxErr<=8)** | `RGB565` | `75.0` | **54.38x (27.2x vs 565)** | `8.30 / 12.84` | **120.5** | `8.30 ms (120.5 fps)` | `37.82 (RGB)` | `15 (RGB)` | `0.0 / 383.7` |
-| **0x06 QUAD_JPEG (HW-Aligned)** | `RGB565` | `54.6` | **74.70x (37.4x vs 565)** | `8.09 / 27.95` | **123.7** | `8.09 ms (123.7 fps)` | `34.76 (RGB)` | `95 (RGB)` | `0.0 / 383.7` |
-
-### 2.9 `Legacy 0x00 Palette RLE (150x150, 37f)` — 原始 BGRA8888: `3252.0 KB`
-
-| 编码模式 (`0x00~0x07`) | 输出格式 | 压缩大小 (KB) | 压缩比 (vs 8888) | 纯解码均/P95 (ms) | 纯解码 FPS | +PPA 全管线 (ms / FPS) | 失真度 PSNR (dB) | 最大误差 MaxErr | 内存 SRAM / PSRAM (KB) |
-| :--- | :---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| **0x00/0x01 PALETTE (RGB565 out)** | `RGB565` | `83.6` | **38.90x (19.4x vs 565)** | `1.45 / 1.48` | **688.2** | `1.45 ms (688.2 fps)` | `48.2` | `7` | `0.0 / 67.4` |
-| **0x00/0x01 PALETTE (BGRA8888 out)** | `BGRA8888` | `83.6` | **38.90x** | `1.24 / 1.27` | **809.1** | `1.24 ms (809.1 fps)` | `Inf (8888 Palette)` | `0` | `0.0 / 111.3` |
-
-### 2.10 `Legacy 0x01/0x03 Palette Huff (360x360, 25f)` — 原始 BGRA8888: `12656.2 KB`
-
-| 编码模式 (`0x00~0x07`) | 输出格式 | 压缩大小 (KB) | 压缩比 (vs 8888) | 纯解码均/P95 (ms) | 纯解码 FPS | +PPA 全管线 (ms / FPS) | 失真度 PSNR (dB) | 最大误差 MaxErr | 内存 SRAM / PSRAM (KB) |
-| :--- | :---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| **0x00/0x01 PALETTE (RGB565 out)** | `RGB565` | `56.5` | **224.19x (112.1x vs 565)** | `52.75 / 71.23` | **19.0** | `52.75 ms (19.0 fps)` | `48.2` | `7` | `0.0 / 381.0` |
-| **0x00/0x01 PALETTE (BGRA8888 out)** | `BGRA8888` | `56.5` | **224.19x** | `52.71 / 71.23` | **19.0** | `52.71 ms (19.0 fps)` | `Inf (8888 Palette)` | `0` | `0.0 / 634.1` |
-
----
-
-## 3. 四大维度深度对比与关键结论
-
-### 3.1 压缩率（Compression Ratio）
-1. **`0x04 LOSSLESS (8888 v2 Joint-Delta)` 是无损体积冠军**：
-   - 在局部透明/微动场景（`full_glow_dot` 272×480）下，压缩比高达 **`1494.25x`**（比 `v1` 再缩小 **28.4%**）；
-   - 在复杂 UI 动效（`ui_demo` 240×240）与表情（`kapi_smile` 360×360）下，比 `v1` 进一步缩减 **12.7% ~ 16.2%**，且保持 **100% 逐比特无损 (`MaxErr = 0`)**。
-2. **`0x05 BTC_SAFE` 将全屏高频复杂动画体积再砍掉 63% ~ 75%**：
-   - 在全屏气流 `full_air_flow` (272×480) 上，8888 无损需 `421.1 KB`，而 `0x05 BTC_SAFE (8888)` 仅需 **`107.1 KB`（压缩比 `38.07x`，缩小 74.6%）**；
-   - 在全屏高频沙尘 `full_sandstorm` (272×480) 上，8888 无损需 `365.2 KB`，`0x05 BTC_SAFE (8888)` 仅需 **`134.9 KB`（缩小 63.1%）**。
-3. **`0x06 QUAD_JPEG` 在不透明连续光影动画上体积最小**：
-   - 在 `ui_demo` (240×240) 上仅 **`39.8 KB`（压缩比 `86.44x`）**，在 `full_air_flow` 上仅 **`37.2 KB`（压缩比 `109.56x`）**，非常适合无透明通道的自然光影背景。
-
-### 3.2 板端解码效率与零拷贝优化（Decode Throughput on ESP32-S31 @ 320 MHz）
-1. **关键帧原地零拷贝解压 (`Direct-to-Frame Inflate`) + `Speed-Aware RDO` 带来显著提速**：
-   - `Submode 0 (Raw Keyframe)` 直接解压入 `p->frame`，消除了 510 KB PSRAM `memcpy` 与额外暂存区；
-   - 在 `Full-Screen Air Flow` (272×480) 上，`0x04 LOSSLESS (v2 RDO)` 纯解码耗时从 `v1` 的 **`29.29 ms/帧 (34.1 fps)`** 压降至 **`17.41 ms/帧 (57.4 fps)`**（**提速 40.6%**）；
-   - 在 `Full-Screen Sandstorm` (272×480) 上，纯解码耗时从优化前的 `35.42 ms` 降至 **`25.32 ms/帧 (39.5 fps)`**；
-   - 在 `Transparent Emote` (152×152) 上，`Tile-Packed` 纯解码仅 **`0.87 ms/帧 (1145.5 fps)`**。
-2. **`0x05 BTC_SAFE (8888)` 是全场解码速度最快的全彩带透明方案**：
-   - `asking` (160×80)：纯解码仅 **`0.18 ms/帧 (5494.5 fps)`**，加 PPA 混合仅 **`0.72 ms/帧 (1385.0 fps)`**；
-   - `kapi_smile` (360×360)：纯解码仅 **`1.67 ms/帧 (598.4 fps)`**；
-   - `full_air_flow` (272×480)：纯解码仅 **`4.08 ms/帧 (244.9 fps)`**，加 PPA 全管线仅 **`8.59 ms/帧 (116.4 fps)`**（比无损 `v1` 快 **7.2 倍**！）；
-   - `full_sandstorm` (272×480)：纯解码仅 **`7.49 ms/帧 (133.5 fps)`**。
-3. **`0x00~0x03 PALETTE` 原生 BGRA8888 直出比转 565 更快且零失真**：
-   - `transparent.eaf` (150×150)：直接查表输出 32-bit `BGRA8888` 耗时 **`1.24 ms/帧 (809.1 fps)`**，比降采样计算 `RGB565` (`1.45 ms/帧`) 快 **14.9%**，且消除了 565 截断误差（`MaxErr` 从 7 降为 0）。
-
-### 3.3 失真度（Fidelity: PSNR & Max Channel Error）
-- **`0x04 LOSSLESS (8888 v1 / v2 / Tile-Packed)`**：全序列四通道 **`PSNR = Inf dB`，`MaxErr = 0`**，100% 逐字节可逆无损（含 `Alpha = 0` 下的隐藏 RGB）。
-- **`0x05 BTC_SAFE (8888)`**：通过 64B 原始 `BGRA8888` 逃逸块兜底，全序列任意像素任意通道的绝对误差严格锁死在 **`MaxErr <= 8`**，实测 `PSNR` 高达 **`46.77 ~ 101.77 dB`**（显著高于 `0x04 Lossless 565+A8` 因 16-bit 量化产生的 `35.56 ~ 57.09 dB`！即 **8888 的准无损 `BTC_SAFE` 画质高于 565 无损，同时体积小一半、解码快 3~7 倍**）。
-- **`0x04 LOSSLESS (565+A8)`**：受限于 RGB565 的 5-6-5 位深截断，相对于 8888 源图的 `PSNR` 为 **`35.56 ~ 71.62 dB`**（`MaxErr = 6~7`），Alpha 通道保持 `Inf dB` (`MaxErr = 0`)。
-- **`0x06 QUAD_JPEG`**：频域有损压缩（无 Alpha），RGB `PSNR` 在 **`30.64 ~ 56.51 dB`**，适合无锐利描边的自然连续光影。
-
-### 3.4 内存占用优化结果（Memory Footprint: Internal SRAM & PSRAM）
-- **Internal SRAM 极低占用**：
-  - `EAF4 (BGRA8888)` 解码器固定仅占 **`8.5 KB (8,708 Bytes)`** 内部 SRAM；
-  - `0x89 EAF (565)` 解码器（`0x04 / 0x05 / 0x06`）默认不再抢占 64 KB 内部 SRAM，常驻 Internal SRAM 降为 **`0.0 KB`**。
-- **PSRAM 峰值占用大幅降低（按需分配非关键帧 Scratch）**：
-  - 关键帧（`Submode 0`）直接解压至 `p->frame` 后，`p->scratch` 仅需按最大帧间差分块分配：
-    - `Full-Screen Glow Dot (272×480)`：PSRAM 从 `1,020.8 KB` 降至 **`513.0 KB`**（立省 **507.8 KB**）；
-    - `Full-Screen Water Wave (272×480)`：PSRAM 从 `1,067.1 KB` 降至 **`588.8 KB`**（立省 **478.3 KB**）；
-    - `Full-Screen Air Flow (272×480 v2)`：PSRAM 从 `1,093.4 KB` 降至 **`763.9 KB`**（立省 **329.5 KB**）；
-    - `Full-Screen Sandstorm (272×480)`：PSRAM 从 `1,088.5 KB` 降至 **`578.5 KB`**（立省 **510.0 KB**）；
-    - `Kapi Smile (360×360)`：PSRAM 从 `1,016.8 KB` 降至 **`552.4 KB`**（立省 **464.4 KB**）。
-
----
-
-## 4. 生产工程选型建议汇总
-
-| 场景需求 | 首选模式 | 推荐命令参数 | 实测收益总结 |
-| :--- | :--- | :--- | :--- |
-| **带透明前景 · 100% 零误差无损 (默认)** | **`0x04 LOSSLESS (8888 v2)`** | `--format 8888 --codec lossless --lossless-profile v2` | `PSNR = Inf`, 局部动效比 v1 再小 15%~28%，SRAM 仅 8.5 KB |
-| **带透明前景 · 全屏复杂动画高帧率无损** | **`0x04 LOSSLESS (Tile-Packed)`** | `--format 8888 --codec lossless --lossless-profile tile_packed` | `PSNR = Inf`, 272×480 全屏复杂气流解码从 30.6ms 降至 **18.8ms (+38.7%)** |
-| **带透明前景 · 极致小体积与极速解码** | **`0x05 BTC_SAFE (8888)`** | `--format 8888 --codec btc-safe --btc-max-error 8` | 体积比无损小 **63%~75%**, 解码 **1.2~7.5ms/帧 (快 4~7 倍)**, 画质 `45~98 dB` 优于 565 无损 |
-| **不透明自然光影底图 / 实拍视频** | **`0x06 QUAD_JPEG`** 或 **`0x07 H264`** | `--format 565 --codec quad-jpeg` | 体积比块编码再小 40%~70%，自动对齐 S31/P4 硬件 JPEG 2D-DMA |
+The generated table includes compressed size, ratio, average/P95/max decode latency,
+decode FPS, display-ready pipeline time, encoder-side PSNR/MaxErr references and measured
+SRAM/PSRAM usage. The firmware records target revision, CPU clock, ESP-IDF version and
+compiler optimization mode; board/module and PSRAM clock must be added to the run notes.
+RGB565 quality values include RGB888-to-RGB565 quantization; JPEG Delta quality is marked
+as an encoder-side approximation, while device timing and CRC come from the final blob.
