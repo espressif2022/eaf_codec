@@ -85,16 +85,15 @@ static void interpolate_palette(const bounded_view_t *view, uint32_t *palette)
 
 static void store_color(const bounded_view_t *view, size_t index, uint32_t color)
 {
-    if (view->container == ESP_EAF_CONTAINER_EAF8888) {
+    if (view->pixel_bytes == 4) {
         ((uint32_t *)view->output)[index] = color;
         return;
     }
-#ifdef ESP_PLATFORM
     uint16_t rgb565 = (uint16_t)color;
+#ifdef ESP_PLATFORM
     ((uint16_t *)view->output)[index] = view->swap_rgb565 ? __builtin_bswap16(rgb565) : rgb565;
 #else
-    (void)index;
-    (void)color;
+    ((uint16_t *)view->output)[index] = rgb565;
 #endif
 }
 
@@ -102,14 +101,16 @@ static int prepare_view(const esp_eaf_codec_request_t *request, bounded_view_t *
 {
     *view = (bounded_view_t){ .container = request->container };
     if (request->container == ESP_EAF_CONTAINER_EAF8888) {
-        if (request->mode != EAF4_SUBMODE_BTC8888_SAFE || !request->frame || !request->scratch ||
+        bool is_565 = (request->mode == EAF4_SUBMODE_BTC565_SAFE);
+        bool is_8888 = (request->mode == EAF4_SUBMODE_BTC8888_SAFE);
+        if ((!is_565 && !is_8888) || !request->frame || !request->scratch ||
             !request->frame_width || !request->frame_height || request->frame_width % 4 ||
             request->frame_height % 4) {
             return -1;
         }
         size_t tiles = (size_t)request->frame_width * request->frame_height / 16;
         if (request->decoded_size < tiles) return -1;
-        view->pixel_bytes = 4;
+        view->pixel_bytes = is_565 ? 2 : 4;
         view->width = request->frame_width;
         view->height = request->frame_height;
         view->modes = request->scratch;
@@ -166,6 +167,7 @@ int esp_eaf_codec_bounded_decode(const esp_eaf_codec_request_t *request)
     const unsigned sizes_8888[] = {0, 4, 10, 12, 64};
     const unsigned *sizes = view.pixel_bytes == 2 ? sizes_565 : sizes_8888;
     int result = 0;
+    uint16_t min_x = view.width, min_y = view.height, max_x = 0, max_y = 0;
 
     for (size_t tile = 0; tile < tiles; tile++) {
         unsigned mode = view.modes[tile];
@@ -177,6 +179,10 @@ int esp_eaf_codec_bounded_decode(const esp_eaf_codec_request_t *request)
 
         unsigned tx = (unsigned)(tile % (view.width / 4)) * 4;
         unsigned ty = (unsigned)(tile / (view.width / 4)) * 4;
+        if (tx < min_x) min_x = (uint16_t)tx;
+        if (ty < min_y) min_y = (uint16_t)ty;
+        if (tx + 3 > max_x) max_x = (uint16_t)(tx + 3);
+        if (ty + 3 > max_y) max_y = (uint16_t)(ty + 3);
         uint32_t palette[4] = {0};
         uint32_t mask = 0;
         if (mode < 4) {
@@ -211,6 +217,15 @@ int esp_eaf_codec_bounded_decode(const esp_eaf_codec_request_t *request)
 #endif
     }
     if (result == 0 && view.src != view.end) result = -1;
+    if (result == 0 && request->eaf4_dirty) {
+        if (min_x <= max_x && min_y <= max_y) {
+            *request->eaf4_dirty = (eaf4_dirty_rect_t){
+                .x1 = min_x, .y1 = min_y, .x2 = max_x, .y2 = max_y, .valid = true
+            };
+        } else {
+            *request->eaf4_dirty = (eaf4_dirty_rect_t){0};
+        }
+    }
     free(view.owned_payload);
     return result;
 }

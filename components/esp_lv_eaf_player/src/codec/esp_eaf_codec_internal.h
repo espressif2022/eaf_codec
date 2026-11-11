@@ -57,12 +57,14 @@ typedef struct {
     esp_eaf_palette_cache_t *palette_cache;
 #endif
     uint8_t mode;
+    uint8_t pixel_format; /*!< eaf4_pixfmt_t for unified EAF4 container */
     uint8_t *frame;
     const uint8_t *scratch;
     uint32_t decoded_size;
     uint32_t frame_bytes;
     uint16_t frame_width;
     uint16_t frame_height;
+    eaf4_dirty_rect_t *eaf4_dirty;
 } esp_eaf_codec_request_t;
 
 typedef int (*esp_eaf_codec_decode_cb_t)(const esp_eaf_codec_request_t *request);

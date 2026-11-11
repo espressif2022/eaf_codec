@@ -67,6 +67,10 @@ typedef struct {
 esp_err_t esp_eaf_player_open_memory(const void *data, size_t size,
                                      const esp_eaf_player_config_t *config,
                                      esp_eaf_player_t **out_player);
+esp_err_t esp_eaf_player_open_file(const char *path,
+                                   const esp_eaf_player_config_t *config,
+                                   esp_eaf_player_t **out_player);
+void esp_eaf_player_release_cache(esp_eaf_player_t *player);
 void esp_eaf_player_close(esp_eaf_player_t *player);
 
 const esp_eaf_stream_info_t *esp_eaf_player_get_info(const esp_eaf_player_t *player);

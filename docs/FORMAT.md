@@ -1,10 +1,11 @@
-# EAF4 BGRA8888 帧子模式（0..6）格式规范
+# EAF4 统一容器与帧子模式（0..9）格式规范
 
-这里的 `mode 0..6` 是 EAF4 索引中的**帧级子模式**，不是统一编码表的
-顶层 codec ID：子模式 `0..5` 属于 `0x04 LOSSLESS`，子模式 `6` 属于
+`EAF4` 是支持 `BGRA8888`、`RGB565` 与 `RGB565A8` 的统一带索引、带 CRC 动画容器。
+这里的 `mode 0..9` 是 EAF4 索引中的**帧级子模式**，不是统一编码表的
+顶层 codec ID：子模式 `0..5, 7, 8` 属于 `0x04 LOSSLESS`，子模式 `6, 9` 属于
 `0x05 BTC_SAFE`。
 
-支持全四通道 8-bit (`B, G, R, A`) 无损与有界误差压缩容器。Alpha 为
+支持全四通道 8-bit (`B, G, R, A`) 与 16-bit (`RGB565` / `RGB565+A8`) 无损与有界误差压缩容器。Alpha 为
 **Straight Alpha（非预乘）**：RGB 不预乘 A，且 `A=0` 下的隐藏 RGB 仍属于
 帧数据。宽和高必须是 4 的倍数，且各自不超过 1024。文件小于 32 MiB，
 帧数不超过 10000。完整色深和透明度语义见
@@ -29,7 +30,7 @@
 | 10 | u16 | height | 4 的倍数 |
 | 12 | u32 | frames | 1..10000 |
 | 16 | u32 | period_ms | 10..10000 |
-| 20 | u32 | frame_bytes | `width * height * 4` |
+| 20 | u32 | frame_bytes | `width * height * bpp` (`bpp` = 4 for BGRA8888, 3 for RGB565A8, 2 for RGB565) |
 | 24 | u32 | index_offset | `64` |
 | 28 | u32 | data_offset | `64 + frames * 24` |
 | 32 | u32 | file_size | 整个文件长度 |
@@ -38,7 +39,9 @@
 | 40 | u32 | header_crc | 本字段置 0 后，对 64 字节头做 IEEE CRC-32 |
 | 44 | u32 | index_crc | 索引区 CRC-32 |
 | 48 | u32 | flags | `1` |
-| 52 | 12s | reserved | 全 0 |
+| 52 | u8 | pixel_format | `0 = BGRA8888`（v1 默认兼容），`1 = RGB565`，`2 = RGB565A8` |
+| 53 | u8 | codec_id | `0 = 由帧索引决定（v1 兼容）`，或 `0x04 (LOSSLESS)` / `0x05 (BTC_SAFE)` |
+| 54 | 10s | reserved | 全 0 |
 
 ### Index Entry（24 字节）
 
@@ -68,6 +71,9 @@
 | **4** | `MODE_TILE_PACKED` | 100% 无损 | 小端 `4×4` 变化块位图 + 变化块交错 32-bit BGRA 字 XOR | 省去四通道移位拼字，直接执行 32-bit 字异或；收益取决于内容与目标芯片 |
 | **5** | `MODE_JOINT_DELTA` | 100% 无损 | 小端 `4×4` 变化块位图 + 变化像素三进制联合符号 $(\Delta B,\Delta G,\Delta R,\Delta A)\in[-1,1]^4 \rightarrow 0..80$（`255` 为逃逸）+ 四平面逃逸流 | `0x04 LOSSLESS` 的联合小差分表示 |
 | **6** | `MODE_BTC8888_SAFE` | 有界误差 ($\text{maxErr}\le 8$) | `modes[num_tiles]` + 非跳过块载荷：<br>• `0`: Skip (`0B`)<br>• `1`: Flat 单色 (`4B` BGRA)<br>• `2`: 1-bit 双色 (`8B` 端点 + `2B` 掩码)<br>• `3`: 2-bit 四色线性插值 (`8B` 端点 + `4B` 掩码)<br>• `4`: Raw 逃逸块 (`64B` 原始 BGRA8888) | `0x05 BTC_SAFE` 的 BGRA8888 表示 |
+| **7** | `MODE_565A8_TILES` | 100% 565+A8 无损 | 小端 `4×4` 变化块位图 + `c_low` + `c_high` XOR + `A8` 加法差分 | `0x04 LOSSLESS` 的 RGB565+A8 块差分表示 |
+| **8** | `MODE_565A8_JOINT` | 100% 565+A8 无损 | 小端 `4×4` 变化块位图 + 81 态三进制联合符号 + 三平面逃逸流 | `0x04 LOSSLESS` 的 RGB565+A8 联合符号表示 |
+| **9** | `MODE_BTC565_SAFE` | 有界误差 ($\text{maxErr}\le 8$) | `modes[num_tiles]` + 非跳过块载荷（`0B` / `2B` / `6B` / `8B` / `32B` 原始 RGB565 逃逸块） | `0x05 BTC_SAFE` 的 RGB565 表示 |
 
 ---
 

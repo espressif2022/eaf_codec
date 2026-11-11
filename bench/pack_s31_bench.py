@@ -240,7 +240,7 @@ def main() -> int:
                 )
                 blobs.append(blob)
 
-            # --- 565 Modes (0x89 EAF container) ---
+            # --- 565 Modes (0x89 EAF container + Unified EAF4 container) ---
             five_modes = [
                 ("0x04_Lossless_565A8", "lossless", "0x04 EAF Lossless (565+A8)", raw_565a8_bytes),
                 ("0x05_Bounded_565", "btc-safe", "0x05 EAF Bounded (565 bound=8)", raw_565_bytes),
@@ -289,6 +289,40 @@ def main() -> int:
                     }
                 )
                 blobs.append(blob)
+
+            if name in ("alpha_glow", "flat_ui", "micro_motion"):
+                from encoder.eaf4 import encode_565 as encode_eaf4_565
+                for codec_label, mode565, codec_id_str, fmt_str, native_raw in [
+                    ("0x04_Lossless_565A8_EAF4", "lossless", "0x04 EAF4 Lossless (565+A8)", "RGB565A8", raw_565a8_bytes),
+                    ("0x05_Bounded_565_EAF4", "btc-safe", "0x05 EAF4 Bounded (565 bound=8)", "RGB565", raw_565_bytes),
+                ]:
+                    blob, summary = encode_eaf4_565(frames, codec=mode565, btc_max_error=8)
+                    recon = decode_eaf4(blob)
+                    q = compute_quality_bgra(frames, recon)
+                    q["quality_method"] = "eaf4_reference_decode"
+                    q["quality_max_error"] = q["max_err_rgb"]
+                    entries_meta.append(
+                        {
+                            "asset": name,
+                            "dataset": dataset_name,
+                            "desc": desc,
+                            "codec_key": codec_label,
+                            "codec_title": codec_id_str,
+                            "format": fmt_str,
+                            "container_type": CONT_EAF4_8888,
+                            "width": w,
+                            "height": h,
+                            "frames": n_frames,
+                            "raw_bytes": raw_8888_bytes,
+                            "native_raw_bytes": native_raw,
+                            "compressed_bytes": len(blob),
+                            "ratio_vs_8888": round(raw_8888_bytes / len(blob), 2),
+                            "ratio_vs_native": round(native_raw / len(blob), 2),
+                            "submodes": summary["mode_counts_all"],
+                            **q,
+                        }
+                    )
+                    blobs.append(blob)
 
     # 3. Legacy 0x00..0x03 Palette EAF sample tested in both 565 and native 8888 output modes
     for sample_name, w, h, n_f, desc in [

@@ -239,23 +239,27 @@ static bool run_eaf4_item(int idx, const char *asset, const char *codec, const u
             dec_samples[loop * n + i] = dec_us;
 
             int64_t t_post = esp_timer_get_time();
+            if (info->pixel_format == EAF4_PIXFMT_BGRA8888) {
 #if SOC_PPA_SUPPORTED
-            ppa_client_handle_t ppa = (ppa_client_handle_t)post_handle;
-            esp_cache_msync((void *)px, (info->frame_bytes + 63U) & ~63U, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
-            ppa_blend_oper_config_t bc = {
-                .in_bg = {.buffer = bg, .pic_w = w, .pic_h = h, .block_w = w, .block_h = h, .blend_cm = PPA_BLEND_COLOR_MODE_RGB888},
-                .in_fg = {.buffer = px, .pic_w = w, .pic_h = h, .block_w = w, .block_h = h, .blend_cm = PPA_BLEND_COLOR_MODE_ARGB8888},
-                .out = {.buffer = out_rgb, .buffer_size = rgb_bytes, .pic_w = w, .pic_h = h, .blend_cm = PPA_BLEND_COLOR_MODE_RGB888},
-                .bg_alpha_update_mode = PPA_ALPHA_NO_CHANGE,
-                .fg_alpha_update_mode = PPA_ALPHA_NO_CHANGE,
-                .mode = PPA_TRANS_MODE_BLOCKING,
-            };
-            ppa_do_blend(ppa, &bc);
+                ppa_client_handle_t ppa = (ppa_client_handle_t)post_handle;
+                esp_cache_msync((void *)px, (info->frame_bytes + 63U) & ~63U, ESP_CACHE_MSYNC_FLAG_DIR_C2M);
+                ppa_blend_oper_config_t bc = {
+                    .in_bg = {.buffer = bg, .pic_w = w, .pic_h = h, .block_w = w, .block_h = h, .blend_cm = PPA_BLEND_COLOR_MODE_RGB888},
+                    .in_fg = {.buffer = px, .pic_w = w, .pic_h = h, .block_w = w, .block_h = h, .blend_cm = PPA_BLEND_COLOR_MODE_ARGB8888},
+                    .out = {.buffer = out_rgb, .buffer_size = rgb_bytes, .pic_w = w, .pic_h = h, .blend_cm = PPA_BLEND_COLOR_MODE_RGB888},
+                    .bg_alpha_update_mode = PPA_ALPHA_NO_CHANGE,
+                    .fg_alpha_update_mode = PPA_ALPHA_NO_CHANGE,
+                    .mode = PPA_TRANS_MODE_BLOCKING,
+                };
+                ppa_do_blend(ppa, &bc);
 #else
-            (void)post_handle;
-            bgra8888_to_rgb565_over_bg(px, (uint16_t *)out_rgb, pixels);
+                (void)post_handle;
+                bgra8888_to_rgb565_over_bg(px, (uint16_t *)out_rgb, pixels);
 #endif
-            uint32_t post_us = (uint32_t)(esp_timer_get_time() - t_post);
+            }
+            uint32_t post_us = (info->pixel_format == EAF4_PIXFMT_BGRA8888)
+                                   ? (uint32_t)(esp_timer_get_time() - t_post)
+                                   : 0;
             total_post_us += post_us;
             pipe_samples[loop * n + i] = dec_us + post_us;
 
@@ -271,11 +275,13 @@ static bool run_eaf4_item(int idx, const char *asset, const char *codec, const u
     qsort(dec_samples, sample_count, sizeof(uint32_t), cmp_u32);
     qsort(pipe_samples, sample_count, sizeof(uint32_t), cmp_u32);
 
-    printf("BENCH_RESULT idx=%d asset=%s codec=%s fmt=BGRA8888 w=%lu h=%lu frames=%lu "
+    const char *fmt_str = (info->pixel_format == EAF4_PIXFMT_BGRA8888) ? "BGRA8888" :
+                          (info->pixel_format == EAF4_PIXFMT_RGB565A8) ? "RGB565A8" : "RGB565";
+    printf("BENCH_RESULT idx=%d asset=%s codec=%s fmt=%s w=%lu h=%lu frames=%lu "
            "comp_bytes=%lu sram_B=%lu psram_B=%lu "
            "dec_avg_us=%lu dec_p95_us=%lu dec_max_us=%lu inf_avg_us=%lu rec_avg_us=%lu "
            "post_avg_us=%lu pipe_avg_us=%lu pipe_p95_us=%lu crc=%08lx post_mode=%s\n",
-           idx, asset, codec, (unsigned long)w, (unsigned long)h, (unsigned long)n,
+           idx, asset, codec, fmt_str, (unsigned long)w, (unsigned long)h, (unsigned long)n,
            (unsigned long)size, (unsigned long)sram_used, (unsigned long)psram_used,
            (unsigned long)(total_dec_us / sample_count),
            (unsigned long)dec_samples[(sample_count - 1) * 95 / 100],

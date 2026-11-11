@@ -32,7 +32,7 @@ if str(ROOT) not in sys.path:
 if str(ROOT / "tools") not in sys.path:
     sys.path.insert(0, str(ROOT / "tools"))
 
-from encoder.eaf4 import INDEX, INDEX_SIZE, MODE_NAMES, decode, encode  # noqa: E402
+from encoder.eaf4 import INDEX, INDEX_SIZE, MODE_NAMES, decode, encode, encode_565  # noqa: E402
 from encoder.eaf565 import convert_to_eaf  # noqa: E402
 from eaf_inspector.parser import parse_file, print_text  # noqa: E402
 
@@ -155,12 +155,13 @@ def _encode_single_to_bytes(
     key_interval: int,
     btc_max_error: int,
     resize: tuple[int, int] | None = None,
+    legacy_container: bool = False,
 ) -> tuple[bytes, dict]:
     align = 16 if codec == "quad-jpeg" else 4
     bgra_frames = _load_input_frames(inputs, align=align, resize=resize)
     h, w, _ = bgra_frames[0].shape
 
-    if fmt == "565" or codec in ("quad-jpeg", "h264"):
+    if codec in ("quad-jpeg", "h264") or (fmt == "565" and legacy_container):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_dir = Path(tmp)
             png_paths = []
@@ -189,6 +190,20 @@ def _encode_single_to_bytes(
                 "crc32": zlib.crc32(blob) & 0xFFFFFFFF,
             }
             return blob, summary
+
+    if fmt == "565":
+        blob, summary = encode_565(
+            bgra_frames,
+            period_ms=period,
+            key_interval=key_interval,
+            codec=codec,
+            btc_max_error=btc_max_error,
+        )
+        summary["container"] = "EAF4(565)" if codec == "btc-safe" else "EAF4(565A8)"
+        summary["format"] = "565"
+        summary["codec"] = codec
+        summary["crc32"] = zlib.crc32(blob) & 0xFFFFFFFF
+        return blob, summary
 
     profile = "btc8888" if codec == "btc-safe" else lossless_profile
     blob, summary = encode(
@@ -226,6 +241,7 @@ def _encode(args: argparse.Namespace) -> int:
         key_interval=args.key_interval,
         btc_max_error=args.btc_max_error,
         resize=resize,
+        legacy_container=getattr(args, "legacy_container", False),
     )
     out_path = Path(args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -251,7 +267,8 @@ def _batch(args: argparse.Namespace) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     resize = _parse_resize(args.resize)
     internal_codec = _normalize_codec(args.codec)
-    ext = ".eaf4" if (args.format == "8888" and internal_codec in ("lossless", "btc-safe")) else ".eaf"
+    legacy_cont = getattr(args, "legacy_container", False)
+    ext = ".eaf4" if (internal_codec in ("lossless", "btc-safe") and not legacy_cont) else ".eaf"
 
     targets: list[tuple[str, list[str]]] = []
     for child in sorted(in_dir.iterdir(), key=_natural_sort_key):
@@ -277,6 +294,7 @@ def _batch(args: argparse.Namespace) -> int:
             key_interval=args.key_interval,
             btc_max_error=args.btc_max_error,
             resize=resize,
+            legacy_container=legacy_cont,
         )
         file_out = out_dir / f"{name}{ext}"
         file_out.write_bytes(blob)
@@ -353,17 +371,19 @@ def _inspect(args: argparse.Namespace) -> int:
         frames = decode(data)
         version, _header_size, width, height = struct.unpack_from("<HHHH", data, 4)
         n_frames, period_ms, frame_bytes, index_offset, _data_offset, file_size = struct.unpack_from("<IIIIII", data, 12)
-        counts = [0] * 7
+        pixfmt = data[52]
+        pixfmt_name = {0: "BGRA8888", 1: "RGB565", 2: "RGB565A8"}.get(pixfmt, f"unknown({pixfmt})")
+        counts = [0] * 10
         for i in range(n_frames):
             rec = INDEX.unpack_from(data, index_offset + i * INDEX_SIZE)
             m = rec[4]
             if 0 <= m < len(counts):
                 counts[m] += 1
-        codec_id = "0x05 EAF Bounded (BTC_SAFE)" if counts[6] > 0 else "0x04 EAF Lossless (LOSSLESS)"
+        codec_id = "0x05 EAF Bounded (BTC_SAFE)" if (counts[6] > 0 or counts[9] > 0) else "0x04 EAF Lossless (LOSSLESS)"
         sub_str = ", ".join(f"{MODE_NAMES[m]}:{c}" for m, c in enumerate(counts) if c > 0)
         print(
             f"OK {args.file}\n"
-            f"  container         : EAF4 (BGRA8888 v{version})\n"
+            f"  container         : EAF4 ({pixfmt_name} v{version})\n"
             f"  codec             : {codec_id}\n"
             f"  bytes             : {file_size}\n"
             f"  size              : {width}x{height}\n"
@@ -409,6 +429,7 @@ def main() -> int:
         help="maximum channel error for 0x05 bounded (default: 8; --btc-max-error is a legacy alias)",
     )
     enc.add_argument("--resize", default=None, help="Optional resize WIDTHxHEIGHT (e.g. 240x240)")
+    enc.add_argument("--legacy-container", action="store_true", help="Emit legacy 0x89 EAF container for 565 modes")
     enc.add_argument("--c-header", default=None, help="Optional path to emit C array header (.h)")
     enc.add_argument("--c-symbol", default=None, help="Optional C array identifier name")
     enc.set_defaults(func=_encode)
@@ -429,6 +450,7 @@ def main() -> int:
     bat.add_argument("--key-interval", type=int, default=30)
     bat.add_argument("--max-error", "--btc-max-error", dest="btc_max_error", type=int, default=8)
     bat.add_argument("--resize", default=None)
+    bat.add_argument("--legacy-container", action="store_true", help="Emit legacy 0x89 EAF container for 565 modes")
     bat.set_defaults(func=_batch)
 
     for cmd in ("info", "inspect"):

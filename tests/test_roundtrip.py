@@ -139,6 +139,16 @@ def main() -> int:
             raise SystemExit("Batch flash packager failed")
         verify_with_c(verifier, v1_out.read_bytes(), directory, "cli_v1")
         verify_with_c(verifier, btc8888_out.read_bytes(), directory, "cli_btc8888")
+        verify_with_c(verifier, eaf565_lossless.read_bytes(), directory, "cli_565_lossless")
+        verify_with_c(verifier, eaf565_btc.read_bytes(), directory, "cli_565_btc")
+
+        # Also verify --legacy-container for 565
+        legacy_565 = directory / "clip_legacy_565.eaf"
+        subprocess.run(
+            [sys.executable, cli, "encode", "-o", str(legacy_565), "--format", "565", "--codec", "lossless", "--legacy-container", *[str(p) for p in paths]],
+            check=True,
+        )
+        subprocess.run([sys.executable, cli, "inspect", str(legacy_565)], check=True)
 
         # 3. Verify representative public scenes across all EAF4 profiles.
         for clip_name in ("alpha_glow", "micro_motion", "natural_motion"):

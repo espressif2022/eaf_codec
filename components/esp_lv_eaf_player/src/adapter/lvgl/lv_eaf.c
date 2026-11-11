@@ -270,9 +270,15 @@ static void next_frame_task_cb(lv_timer_t *timer)
     LV_EAF_CACHE_DROP(LV_EAF_GET_SRC(obj));
     const esp_eaf_stream_info_t *info = esp_eaf_player_get_info(eaf->player);
     const esp_eaf_frame_t *frame = esp_eaf_player_get_frame(eaf->player);
-    if (!info || !frame || !frame->dirty.valid ||
-        (frame->dirty.x1 == 0 && frame->dirty.y1 == 0 &&
-         frame->dirty.x2 >= info->width - 1 && frame->dirty.y2 >= info->height - 1)) {
+    if (!info || !frame) {
+        lv_obj_invalidate(obj);
+        return;
+    }
+    if (!frame->dirty.valid) {
+        return;
+    }
+    if (frame->dirty.x1 == 0 && frame->dirty.y1 == 0 &&
+        frame->dirty.x2 >= info->width - 1 && frame->dirty.y2 >= info->height - 1) {
         lv_obj_invalidate(obj);
         return;
     }

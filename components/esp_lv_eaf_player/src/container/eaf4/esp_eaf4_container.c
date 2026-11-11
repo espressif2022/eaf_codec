@@ -72,6 +72,7 @@ struct eaf4 {
     bool has_seek_snapshot;
     size_t cached_bytes;
     eaf4_timing_t timing;
+    eaf4_dirty_rect_t dirty;
     uint32_t crc_table[8][256];
     uint32_t next, max_compressed, max_decoded;
 };
@@ -163,6 +164,15 @@ void eaf4_close(eaf4_t *p)
 
 const eaf4_info_t *eaf4_info(const eaf4_t *p) { return p ? &p->info : NULL; }
 const eaf4_timing_t *eaf4_timing(const eaf4_t *p) { return p ? &p->timing : NULL; }
+void eaf4_get_dirty_rect(const eaf4_t *p, eaf4_dirty_rect_t *rect)
+{
+    if (!rect) return;
+    if (p) {
+        *rect = p->dirty;
+    } else {
+        *rect = (eaf4_dirty_rect_t){0};
+    }
+}
 
 static int open_source(const char *path, const void *memory, size_t memory_size, eaf4_t **out)
 {
@@ -197,14 +207,28 @@ static int open_source(const char *path, const void *memory, size_t memory_size,
     memset(h + 40, 0, 4);
     if (crc(p, h, 64) != expected)
         goto bad;
-    for (unsigned i = 52; i < 64; i++)
+    uint8_t pixfmt = h[52];
+    uint8_t top_codec = h[53];
+    if (pixfmt > EAF4_PIXFMT_RGB565A8)
+        goto bad;
+    for (unsigned i = 54; i < 64; i++)
         if (h[i])
             goto bad;
-    p->info = (eaf4_info_t){u16(h + 8), u16(h + 10), u32(h + 12), u32(h + 16), u32(h + 20)};
+    uint32_t bpp = (pixfmt == EAF4_PIXFMT_BGRA8888) ? 4U : (pixfmt == EAF4_PIXFMT_RGB565A8) ? 3U : 2U;
+    p->info = (eaf4_info_t){
+        .width = u16(h + 8),
+        .height = u16(h + 10),
+        .frames = u32(h + 12),
+        .period_ms = u32(h + 16),
+        .frame_bytes = u32(h + 20),
+        .pixel_format = pixfmt,
+        .codec_id = top_codec,
+        .has_alpha = (pixfmt != EAF4_PIXFMT_RGB565),
+    };
     eaf4_info_t *v = &p->info;
     if (!v->width || !v->height || v->width > 1024 || v->height > 1024 || v->width % 4 || v->height % 4 ||
         !v->frames || v->frames > 10000 || v->period_ms < 10 || v->period_ms > 10000 ||
-        v->frame_bytes != (uint32_t)v->width * v->height * 4 || u32(h + 24) != 64 ||
+        v->frame_bytes != (uint32_t)v->width * v->height * bpp || u32(h + 24) != 64 ||
         u32(h + 28) != 64 + v->frames * 24 || u32(h + 32) != (uint32_t)size)
         goto bad;
     uint32_t index_size = v->frames * 24, offset = u32(h + 28);
@@ -218,25 +242,36 @@ static int open_source(const char *path, const void *memory, size_t memory_size,
         goto bad;
     uint32_t num_tiles = (uint32_t)v->width * v->height / 16;
     uint32_t mask_bytes = (num_tiles + 7) / 8;
-    uint32_t max_possible_decoded = v->frame_bytes + num_tiles + 4096;
+    uint32_t max_possible_decoded = v->frame_bytes + num_tiles * 16 + 4096;
     for (uint32_t i = 0; i < v->frames; i++) {
         const uint8_t *r = p->index + i * 24;
         uint32_t length = u32(r + 4), decoded = u32(r + 8);
         uint8_t mode = r[16];
-        if (u32(r) != offset || !length || length > max_possible_decoded || mode > 6 || r[17] ||
-            u16(r + 18) || (!i && mode != EAF4_MODE_RAW && mode != EAF4_MODE_BTC8888_SAFE) ||
+        bool is_key_allowed = (mode == EAF4_MODE_RAW || mode == EAF4_MODE_BTC8888_SAFE || mode == EAF4_MODE_BTC565_SAFE);
+        if (u32(r) != offset || !length || length > max_possible_decoded || mode >= EAF4_SUBMODE_MAX || r[17] ||
+            u16(r + 18) || (!i && !is_key_allowed) ||
             offset > (uint32_t)size || length > (uint32_t)size - offset)
             goto bad;
         if (mode <= EAF4_MODE_PLANAR && decoded != v->frame_bytes)
             goto bad;
         if ((mode == EAF4_MODE_TILE_PLANAR || mode == EAF4_MODE_TILE_PACKED) &&
-            (decoded < mask_bytes || decoded > v->frame_bytes + mask_bytes || (decoded - mask_bytes) % 64))
+            (pixfmt != EAF4_PIXFMT_BGRA8888 || decoded < mask_bytes || decoded > v->frame_bytes + mask_bytes || (decoded - mask_bytes) % 64))
             goto bad;
         if (mode == EAF4_MODE_JOINT_DELTA &&
-            (decoded < mask_bytes || decoded > v->frame_bytes + num_tiles * 16 + mask_bytes))
+            (pixfmt != EAF4_PIXFMT_BGRA8888 || decoded < mask_bytes || decoded > v->frame_bytes + num_tiles * 16 + mask_bytes))
             goto bad;
         if (mode == EAF4_MODE_BTC8888_SAFE &&
-            (decoded < num_tiles || decoded > v->frame_bytes + num_tiles))
+            (pixfmt != EAF4_PIXFMT_BGRA8888 || decoded < num_tiles || decoded > v->frame_bytes + num_tiles))
+            goto bad;
+        if (mode == EAF4_MODE_565A8_TILES &&
+            (pixfmt == EAF4_PIXFMT_BGRA8888 || decoded < mask_bytes || decoded > v->frame_bytes + mask_bytes ||
+             (decoded - mask_bytes) % (16 * bpp)))
+            goto bad;
+        if (mode == EAF4_MODE_565A8_JOINT &&
+            (pixfmt == EAF4_PIXFMT_BGRA8888 || decoded < mask_bytes || decoded > v->frame_bytes + num_tiles * 16 + mask_bytes))
+            goto bad;
+        if (mode == EAF4_MODE_BTC565_SAFE &&
+            (pixfmt != EAF4_PIXFMT_RGB565 || decoded < num_tiles || decoded > v->frame_bytes + num_tiles))
             goto bad;
         offset += length;
         if (length > p->max_compressed)
@@ -313,12 +348,14 @@ int eaf4_next(eaf4_t *p, const uint8_t **pixels, uint32_t *frame_index)
     esp_eaf_codec_request_t request = {
         .container = ESP_EAF_CONTAINER_EAF8888,
         .mode = mode,
+        .pixel_format = p->info.pixel_format,
         .frame = p->frame,
         .scratch = mode == EAF4_MODE_RAW ? p->frame : p->scratch,
         .decoded_size = decoded,
         .frame_bytes = p->info.frame_bytes,
         .frame_width = p->info.width,
         .frame_height = p->info.height,
+        .eaf4_dirty = &p->dirty,
     };
     if (codec->decode(&request) != 0) return -1;
     p->timing.reconstruct_us = (uint32_t)(NOW_US() - start);
@@ -344,9 +381,13 @@ int eaf4_seek(eaf4_t *p, uint32_t target_frame, const uint8_t **pixels)
     if (p->has_seek_snapshot && p->seek_snapshot && p->seek_snapshot_frame == target_frame) {
         memcpy(p->frame, p->seek_snapshot, p->info.frame_bytes);
         p->next = (target_frame + 1) % p->info.frames;
+        p->dirty = (eaf4_dirty_rect_t){0, 0, p->info.width - 1, p->info.height - 1, true};
         if (pixels)
             *pixels = p->frame;
         return 0;
+    }
+    if (target_frame == p->next) {
+        return eaf4_next(p, pixels, NULL);
     }
     uint32_t key = target_frame;
     while (key > 0 && p->index[key * 24 + 16] != EAF4_MODE_RAW)
@@ -358,6 +399,7 @@ int eaf4_seek(eaf4_t *p, uint32_t target_frame, const uint8_t **pixels)
             return -1;
     }
     if (key != target_frame) {
+        p->dirty = (eaf4_dirty_rect_t){0, 0, p->info.width - 1, p->info.height - 1, true};
         if (!p->seek_snapshot)
             p->seek_snapshot = allocate(p->info.frame_bytes);
         if (p->seek_snapshot) {

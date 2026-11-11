@@ -198,10 +198,13 @@ esp_err_t esp_eaf_player_open_memory(const void *data, size_t size,
         player->info.width = info->width;
         player->info.height = info->height;
         player->info.frame_count = info->frames;
-        player->info.pixel_format = ESP_EAF_OUT_BGRA8888;
-        player->info.has_alpha = true;
-        player->frame.pixel_bytes = info->frame_bytes;
-        player->frame.stride = (size_t)info->width * 4;
+        player->info.pixel_format = (info->pixel_format == EAF4_PIXFMT_BGRA8888)
+                                        ? ESP_EAF_OUT_BGRA8888
+                                        : ESP_EAF_OUT_RGB565;
+        player->info.has_alpha = info->has_alpha;
+        size_t px_size = (info->pixel_format == EAF4_PIXFMT_BGRA8888) ? 4 : 2;
+        player->frame.pixel_bytes = (size_t)info->width * info->height * px_size;
+        player->frame.stride = (size_t)info->width * px_size;
     } else {
         if (player->config.output_format == ESP_EAF_OUT_BGRA8888 &&
             player->config.color_key >= 0) {
@@ -258,6 +261,52 @@ fail:
     return err;
 }
 
+esp_err_t esp_eaf_player_open_file(const char *path,
+                                   const esp_eaf_player_config_t *config,
+                                   esp_eaf_player_t **out_player)
+{
+    if (!path || !out_player) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    *out_player = NULL;
+    esp_eaf_player_t *player = calloc(1, sizeof(*player));
+    if (!player) {
+        return ESP_ERR_NO_MEM;
+    }
+    player->config = config ? *config : (esp_eaf_player_config_t)ESP_EAF_PLAYER_CONFIG_DEFAULT();
+    player->info.container = ESP_EAF_CONTAINER_EAF8888;
+    if (eaf4_open(path, &player->eaf4) != 0) {
+        esp_eaf_player_close(player);
+        return ESP_FAIL;
+    }
+    const eaf4_info_t *info = eaf4_info(player->eaf4);
+    player->info.width = info->width;
+    player->info.height = info->height;
+    player->info.frame_count = info->frames;
+    player->info.pixel_format = (info->pixel_format == EAF4_PIXFMT_BGRA8888)
+                                    ? ESP_EAF_OUT_BGRA8888
+                                    : ESP_EAF_OUT_RGB565;
+    player->info.has_alpha = info->has_alpha;
+    size_t px_size = (info->pixel_format == EAF4_PIXFMT_BGRA8888) ? 4 : 2;
+    player->frame.pixel_bytes = (size_t)info->width * info->height * px_size;
+    player->frame.stride = (size_t)info->width * px_size;
+
+    esp_err_t err = esp_eaf_player_seek(player, 0);
+    if (err != ESP_OK) {
+        esp_eaf_player_close(player);
+        return err;
+    }
+    *out_player = player;
+    return ESP_OK;
+}
+
+void esp_eaf_player_release_cache(esp_eaf_player_t *player)
+{
+    if (player && player->eaf4) {
+        eaf4_release_cache(player->eaf4);
+    }
+}
+
 void esp_eaf_player_close(esp_eaf_player_t *player)
 {
     if (!player) return;
@@ -289,15 +338,19 @@ esp_err_t esp_eaf_player_seek(esp_eaf_player_t *player, uint32_t frame_index)
         if (eaf4_seek(player->eaf4, frame_index, &pixels) != 0 || !pixels) {
             return ESP_FAIL;
         }
+        const eaf4_info_t *info = eaf4_info(player->eaf4);
 #if CONFIG_SPIRAM_USE_MALLOC || CONFIG_SPIRAM
-        esp_cache_msync((void *)pixels, ESP_EAF_ALIGN_UP(player->frame.pixel_bytes, 64),
+        esp_cache_msync((void *)pixels, ESP_EAF_ALIGN_UP(info->frame_bytes, 64),
                         ESP_CACHE_MSYNC_FLAG_DIR_C2M);
 #endif
         player->frame.pixels = pixels;
-        player->frame.alpha = NULL;
+        player->frame.alpha = (info->pixel_format == EAF4_PIXFMT_RGB565A8)
+                                  ? (pixels + player->frame.pixel_bytes)
+                                  : NULL;
         player->frame.index = frame_index;
-        player->frame.dirty = (esp_eaf_rect_t){0, 0, player->info.width - 1,
-                                               player->info.height - 1, true};
+        eaf4_dirty_rect_t dirty = {0};
+        eaf4_get_dirty_rect(player->eaf4, &dirty);
+        player->frame.dirty = (esp_eaf_rect_t){dirty.x1, dirty.y1, dirty.x2, dirty.y2, dirty.valid};
         return ESP_OK;
     }
     return decode_legacy(player, frame_index);

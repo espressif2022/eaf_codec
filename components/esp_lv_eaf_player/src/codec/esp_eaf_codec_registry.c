@@ -10,6 +10,9 @@ static const esp_eaf_codec_ops_t s_codecs[] = {
     { ESP_EAF_CONTAINER_EAF8888, EAF4_SUBMODE_TILE_PACKED,  "eaf4-tile-packed",  esp_eaf_codec_eaf4_lossless_decode },
     { ESP_EAF_CONTAINER_EAF8888, EAF4_SUBMODE_JOINT_DELTA,  "eaf4-joint-delta",  esp_eaf_codec_eaf4_lossless_decode },
     { ESP_EAF_CONTAINER_EAF8888, EAF4_SUBMODE_BTC8888_SAFE, "eaf4-bounded",      esp_eaf_codec_bounded_decode },
+    { ESP_EAF_CONTAINER_EAF8888, EAF4_SUBMODE_565A8_TILES,  "eaf4-565a8-tiles",  esp_eaf_codec_eaf4_lossless_decode },
+    { ESP_EAF_CONTAINER_EAF8888, EAF4_SUBMODE_565A8_JOINT,  "eaf4-565a8-joint",  esp_eaf_codec_eaf4_lossless_decode },
+    { ESP_EAF_CONTAINER_EAF8888, EAF4_SUBMODE_BTC565_SAFE,  "eaf4-565-bounded",  esp_eaf_codec_bounded_decode },
 #ifdef ESP_PLATFORM
     { ESP_EAF_CONTAINER_EAF565, ESP_EAF_MODE_PALETTE_RLE,      "palette-rle",      esp_eaf_codec_palette_rle_decode },
     { ESP_EAF_CONTAINER_EAF565, ESP_EAF_MODE_PALETTE_HUFF_RLE, "palette-huff-rle", esp_eaf_codec_palette_huff_rle_decode },
